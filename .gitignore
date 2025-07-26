@@ -1,0 +1,42 @@
+# 환경 변수
+.env
+.env.*.local
+
+# QuickFIX 설정 (client_secret 등 민감 정보)
+config/quickfix.cfg
+
+# FIX 메시지 스토어
+/store/
+
+# 인증서 및 개인 키
+*.pem
+*.key
+*.crt
+
+# 로그 파일
+*.log
+
+# 빌드 결과물
+/bin/
+/build/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# IDE 및 에디터 설정
+.vscode/
+.idea/
+*.suo
+*.sw?
+
+# OS 메타 파일
+.DS_Store
+Thumbs.db
+
+# Go 모듈 캐시, 커버리지
+*.out
+coverage.out
+
+# 임시 파일
+*.tmp
