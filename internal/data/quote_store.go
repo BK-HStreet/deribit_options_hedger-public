@@ -1,57 +1,54 @@
 package data
 
-import "time"
-
-// OptionQuote represents bid/ask for a symbol
-type OptionQuote struct {
-	Bid float64
-	Ask float64
-	T   time.Time
+// Depth represents top-of-book bid/ask for an option.
+type Depth struct {
+	Instrument string
+	Bid        float64
+	Ask        float64
+	BidQty     float64
+	AskQty     float64
 }
 
-type quoteRequest struct {
-	symbol  string
-	quote   OptionQuote
-	replyCh chan map[string]OptionQuote
-	action  string // "set" or "snapshot"
-}
-
+// QuoteStore optimized for HFT: pre-allocated slice + index map.
 type QuoteStore struct {
-	requests chan quoteRequest
+	symbolIndex map[string]int
+	quotes      []Depth
 }
 
-func NewQuoteStore() *QuoteStore {
-	s := &QuoteStore{requests: make(chan quoteRequest, 1000)}
-	go s.run()
-	return s
+// NewQuoteStore initializes the store with known symbols.
+func NewQuoteStore(symbols []string) *QuoteStore {
+	idxMap := make(map[string]int, len(symbols))
+	quotes := make([]Depth, len(symbols))
+	for i, sym := range symbols {
+		idxMap[sym] = i
+		quotes[i] = Depth{Instrument: sym}
+	}
+	return &QuoteStore{symbolIndex: idxMap, quotes: quotes}
 }
 
-func (s *QuoteStore) run() {
-	quotes := make(map[string]OptionQuote)
-	for req := range s.requests {
-		switch req.action {
-		case "set":
-			quotes[req.symbol] = req.quote
-		case "snapshot":
-			snapshot := make(map[string]OptionQuote, len(quotes))
-			for k, v := range quotes {
-				snapshot[k] = v
-			}
-			req.replyCh <- snapshot
-		}
+// Update applies bid/ask updates for a given symbol.
+// Update applies bid/ask updates for a given symbol.
+func (qs *QuoteStore) Update(sym string, bid, bidQty, ask, askQty float64) {
+	if idx, ok := qs.symbolIndex[sym]; ok {
+		d := &qs.quotes[idx]
+		d.Bid = bid
+		d.BidQty = bidQty
+		d.Ask = ask
+		d.AskQty = askQty
 	}
 }
 
-func (s *QuoteStore) Set(symbol string, bid, ask float64) {
-	s.requests <- quoteRequest{
-		symbol: symbol,
-		quote:  OptionQuote{Bid: bid, Ask: ask, T: time.Now()},
-		action: "set",
+// Get returns the current Depth for a symbol.
+func (qs *QuoteStore) Get(sym string) Depth {
+	if idx, ok := qs.symbolIndex[sym]; ok {
+		return qs.quotes[idx]
 	}
+	return Depth{}
 }
 
-func (s *QuoteStore) Snapshot() map[string]OptionQuote {
-	ch := make(chan map[string]OptionQuote, 1)
-	s.requests <- quoteRequest{replyCh: ch, action: "snapshot"}
-	return <-ch
+// Snapshot returns a copy of all quotes.
+func (qs *QuoteStore) Snapshot() []Depth {
+	cp := make([]Depth, len(qs.quotes))
+	copy(cp, qs.quotes)
+	return cp
 }

@@ -20,7 +20,7 @@ import (
 )
 
 func main() {
-	// ✅ .env 자동 로드
+	// ✅ Load .env automatically
 	if err := godotenv.Load(); err == nil {
 		log.Println("[INFO] .env loaded successfully")
 	}
@@ -35,7 +35,7 @@ func main() {
 		log.Fatal("[AUTH] missing DERIBIT_CLIENT_ID or DERIBIT_CLIENT_SECRET")
 	}
 
-	// 2) REST를 이용해 JWT 발급
+	// 2) Issue JWT via REST (used only for auth validation)
 	_ = auth.FetchJWTToken(clientID, clientSecret)
 
 	// 3) Fetch BTC index price
@@ -51,25 +51,20 @@ func main() {
 	// ✅ FIX 모듈에 옵션 리스트 전달
 	fix.SetOptionSymbols(options)
 
-	// var topics []string
-	// for _, inst := range options {
-	// 	topics = append(topics, fmt.Sprintf("book.%s.raw", inst))
-	// }
-
-	// ✅ 채널 기반 QuoteStore + BoxSpreadEngine 초기화
-	store := data.NewQuoteStore()
+	// ✅ QuoteStore + BoxSpreadEngine 초기화
+	store := data.NewQuoteStore(options)
 	engine := strategy.NewBoxSpreadEngine(store)
-	engine.Start()
 
 	// ✅ FIX 엔진에 QuoteStore 주입
 	fix.InitQuoteStore(store)
+	fix.InitBoxEngine(engine)
 
 	// ✅ BoxSpread 시그널 수신 시 주문 전송
 	go func() {
 		for sig := range engine.Signals() {
 			log.Printf("[ORDER] BoxSpread triggered: %s Bid=%.4f / %s Ask=%.4f",
 				sig.CallSym, sig.CallBid, sig.PutSym, sig.PutAsk)
-			// FIX 주문 로직 연결
+			// TODO: FIX 주문 로직 연결
 		}
 	}()
 
@@ -79,11 +74,11 @@ func main() {
 	}
 	defer fix.StopFIXEngine()
 
-	// FIX 엔진은 비동기적으로 시세를 수신하므로 메인 고루틴을 대기 상태로 유지
+	// ✅ Keep main goroutine alive (FIX engine runs async)
 	select {}
-
 }
 
+// Fetch BTC index price via Deribit REST
 func fetchBTCPrice() float64 {
 	res, err := http.Get("https://www.deribit.com/api/v2/public/get_index_price?index_name=btc_usd")
 	if err != nil {
@@ -99,6 +94,7 @@ func fetchBTCPrice() float64 {
 	return r.Result.IndexPrice
 }
 
+// Fetch all active BTC option instruments
 func fetchInstruments() []string {
 	res, err := http.Get("https://www.deribit.com/api/v2/public/get_instruments?currency=BTC&kind=option")
 	if err != nil {
@@ -121,6 +117,7 @@ func fetchInstruments() []string {
 	return names
 }
 
+// Find nearest expiry from the instrument list
 func findNearestExpiry(instruments []string) string {
 	layout := "02Jan06"
 	expMap := map[string]time.Time{}
@@ -151,6 +148,7 @@ func findNearestExpiry(instruments []string) string {
 	return list[0].label
 }
 
+// Filter 40 options closest to ATM for the nearest expiry
 func filterOptions(instruments []string, expiry string, atmPrice float64) []string {
 	type opt struct {
 		name   string
@@ -170,7 +168,7 @@ func filterOptions(instruments []string, expiry string, atmPrice float64) []stri
 	sort.Slice(list, func(i, j int) bool {
 		return abs(list[i].strike-atmPrice) < abs(list[j].strike-atmPrice)
 	})
-	limit := 40
+	limit := 1
 	if len(list) < limit {
 		limit = len(list)
 	}

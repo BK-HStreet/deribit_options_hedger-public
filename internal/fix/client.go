@@ -2,6 +2,7 @@ package fix
 
 import (
 	"OptionsHedger/internal/data"
+	"OptionsHedger/internal/strategy"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -27,10 +28,15 @@ type App struct{}
 // ✅ 전역 선언: 옵션 심볼 리스트와 QuoteStore
 var optionSymbols []string
 var store *data.QuoteStore
+var engine *strategy.BoxSpreadEngine
 
 // ✅ 외부에서 QuoteStore를 주입
 func InitQuoteStore(s *data.QuoteStore) {
 	store = s
+}
+
+func InitBoxEngine(e *strategy.BoxSpreadEngine) {
+	engine = e
 }
 
 // ✅ 옵션 심볼 리스트 설정
@@ -76,19 +82,22 @@ func (App) OnLogon(id quickfix.SessionID) {
 
 func (App) OnLogout(id quickfix.SessionID)                           {}
 func (App) ToApp(msg *quickfix.Message, id quickfix.SessionID) error { return nil }
-
 func (App) FromApp(msg *quickfix.Message, id quickfix.SessionID) quickfix.MessageRejectError {
 	msgType, _ := msg.Header.GetString(quickfix.Tag(35))
 	if msgType == "W" || msgType == "X" {
 		sym, bid, ask, bidQty, askQty := fastParseFIX(msg)
 
-		// ✅ FIX 시세를 채널 기반 QuoteStore로 전달
-		if store != nil && bid > 0 && ask > 0 {
-			store.Set(sym, bid, ask)
-		}
+		if sym != "" && store != nil {
+			store.Update(sym, bid, bidQty, ask, askQty)
 
-		log.Printf("[FIX-DEPTH] %s | Bid=%.4f (Qty=%.4f) | Ask=%.4f (Qty=%.4f)",
-			sym, bid, bidQty, ask, askQty)
+			// benkim.. 아래 3줄 복원
+			// // ✅ BoxSpreadEngine 호출
+			// depth := store.Get(sym)
+			// engine.CheckOpportunity(depth) // 업데이트 직후 시그널 탐지
+
+			log.Printf("[FIX-DEPTH] %s | Bid=%.4f (Qty=%.2f) | Ask=%.4f (Qty=%.2f)",
+				sym, bid, bidQty, ask, askQty)
+		}
 	}
 	return nil
 }
@@ -147,55 +156,59 @@ func fastParseFIX(msg *quickfix.Message) (string, float64, float64, float64, flo
 		group, _ := snap.GetNoMDEntries()
 		for i := 0; i < group.Len(); i++ {
 			entry := group.Get(i)
+			etype := new(field.MDEntryTypeField)
+			price := new(field.MDEntryPxField)
+			qty := new(field.MDEntrySizeField)
+			_ = entry.Get(etype)
+			_ = entry.Get(price)
+			_ = entry.Get(qty)
 
-			etypeField := new(field.MDEntryTypeField)
-			priceField := new(field.MDEntryPxField)
-			qtyField := new(field.MDEntrySizeField)
+			p, _ := price.Value().Float64()
+			q, _ := qty.Value().Float64()
 
-			_ = entry.Get(etypeField)
-			_ = entry.Get(priceField)
-			_ = entry.Get(qtyField)
-
-			price, _ := priceField.Value().Float64()
-			size, _ := qtyField.Value().Float64()
-
-			switch etypeField.Value() {
+			switch etype.Value() {
 			case enum.MDEntryType_BID:
-				bid = price
-				bidQty = size
+				bid = p
+				bidQty = q
 			case enum.MDEntryType_OFFER:
-				ask = price
-				askQty = size
+				ask = p
+				askQty = q
 			}
 		}
 
-	case "X": // Incremental
+	case "X": // Incremental updates
 		incr := marketdataincrementalrefresh.FromMessage(msg)
+
+		// ✅ 메시지 전체에서 Symbol(55) 먼저 읽기
+		symField := new(field.SymbolField)
+		if err := incr.Get(symField); err == nil {
+			sym = symField.Value()
+		}
+
 		group, _ := incr.GetNoMDEntries()
 		for i := 0; i < group.Len(); i++ {
 			entry := group.Get(i)
+			etype := new(field.MDEntryTypeField)
+			price := new(field.MDEntryPxField)
+			qty := new(field.MDEntrySizeField)
+			_ = entry.Get(etype)
+			_ = entry.Get(price)
+			_ = entry.Get(qty)
 
-			symField := new(field.SymbolField)
-			etypeField := new(field.MDEntryTypeField)
-			priceField := new(field.MDEntryPxField)
-			qtyField := new(field.MDEntrySizeField)
+			p, _ := price.Value().Float64()
+			q, _ := qty.Value().Float64()
 
-			_ = entry.Get(symField)
-			_ = entry.Get(etypeField)
-			_ = entry.Get(priceField)
-			_ = entry.Get(qtyField)
-
-			sym = symField.Value()
-			price, _ := priceField.Value().Float64()
-			size, _ := qtyField.Value().Float64()
-
-			switch etypeField.Value() {
+			switch etype.Value() {
 			case enum.MDEntryType_BID:
-				bid = price
-				bidQty = size
+				if bid == 0 { // ✅ 첫 Bid만 저장
+					bid = p
+					bidQty = q
+				}
 			case enum.MDEntryType_OFFER:
-				ask = price
-				askQty = size
+				if ask == 0 { // ✅ 첫 Ask만 저장
+					ask = p
+					askQty = q
+				}
 			}
 		}
 	}
@@ -223,7 +236,8 @@ func InitFIXEngine(cfgPath string) error {
 	}
 
 	storeFactory := file.NewStoreFactory(settings)
-	logFactory := quickfix.NewNullLogFactory()
+	logFactory := quickfix.NewNullLogFactory() // inactivation of FIX default meg
+	// logFactory := screen.NewLogFactory()
 
 	app := App{}
 	initr, err := quickfix.NewInitiator(app, storeFactory, settings, logFactory)
