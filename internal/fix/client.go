@@ -1,6 +1,7 @@
 package fix
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -21,8 +22,10 @@ import (
 // App implements quickfix.Application
 type App struct{}
 
-func (App) OnCreate(id quickfix.SessionID)                           {}
-func (App) OnLogon(id quickfix.SessionID)                            {}
+func (App) OnCreate(id quickfix.SessionID) {}
+func (App) OnLogon(id quickfix.SessionID) {
+	log.Println("[FIX] >>>> OnLogon received from server!")
+}
 func (App) OnLogout(id quickfix.SessionID)                           {}
 func (App) ToApp(msg *quickfix.Message, id quickfix.SessionID) error { return nil }
 func (App) FromApp(msg *quickfix.Message, id quickfix.SessionID) quickfix.MessageRejectError {
@@ -50,7 +53,8 @@ func generateNonce() string {
 	if _, err := rand.Read(b); err != nil {
 		panic(err)
 	}
-	return base64.StdEncoding.EncodeToString(b)
+	// return base64.StdEncoding.EncodeToString(b)
+	return base64.RawURLEncoding.EncodeToString(b)
 }
 
 func (App) ToAdmin(msg *quickfix.Message, id quickfix.SessionID) {
@@ -76,7 +80,8 @@ func (App) ToAdmin(msg *quickfix.Message, id quickfix.SessionID) {
 		h := sha256.New()
 		h.Write([]byte(rawConcat))
 		passwordHash := h.Sum(nil)
-		password := base64.StdEncoding.EncodeToString(passwordHash)
+		// password := base64.StdEncoding.EncodeToString(passwordHash)
+		password := base64.RawURLEncoding.EncodeToString(passwordHash)
 
 		// ✅ 로깅
 		log.Printf("[FIX-DEBUG] RawData(96): %s", rawData)
@@ -84,14 +89,36 @@ func (App) ToAdmin(msg *quickfix.Message, id quickfix.SessionID) {
 		log.Printf("[FIX-DEBUG] SHA256(rawData+secret) HEX: %x", passwordHash)
 		log.Printf("[FIX-DEBUG] Password(554): %s", password)
 
-		// ✅ 태그 세팅
-		msg.Body.SetField(quickfix.Tag(96), quickfix.FIXString(rawData))
-		msg.Body.SetField(quickfix.Tag(553), quickfix.FIXString(clientID))
-		msg.Body.SetField(quickfix.Tag(554), quickfix.FIXString(password))
+		// … rawData, password 계산 …
+
+		// 1) EncryptMethod
+		msg.Body.SetField(quickfix.Tag(98), quickfix.FIXInt(0))
+
+		// 2) HeartBtInt
 		msg.Body.SetField(quickfix.Tag(108), quickfix.FIXInt(30))
 
-		// ✅ 최종 메시지 로깅
-		log.Printf("[FIX-DEBUG] Final Logon Message:\n%s", msg.String())
+		// 3) ResetOnLogon
+		msg.Body.SetField(quickfix.Tag(141), quickfix.FIXBoolean(true))
+
+		// 4) RawDataLength
+		msg.Body.SetField(quickfix.Tag(95), quickfix.FIXInt(len(rawData)))
+
+		// 5) RawData
+		msg.Body.SetField(quickfix.Tag(96), quickfix.FIXString(rawData))
+
+		// 6) Username (ClientID)
+		msg.Body.SetField(quickfix.Tag(553), quickfix.FIXString(clientID))
+
+		// 7) Password
+		msg.Body.SetField(quickfix.Tag(554), quickfix.FIXString(password))
+
+		// log.Printf("[FIX-DEBUG] Final Logon Message:\n%s", msg.String())
+		// (1) SOH(0x01)를 '|'로 바꿔서 읽기 편하게
+		raw := []byte(msg.String())
+		pretty := bytes.ReplaceAll(raw, []byte{0x01}, []byte("|"))
+
+		log.Println("[FIX-OUT] Final Logon message:", string(pretty))
+
 	}
 }
 
