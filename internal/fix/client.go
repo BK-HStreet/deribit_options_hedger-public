@@ -18,7 +18,6 @@ import (
 	"github.com/quickfixgo/fix44/marketdatarequest"
 	"github.com/quickfixgo/fix44/marketdatasnapshotfullrefresh"
 	"github.com/quickfixgo/quickfix"
-	"github.com/quickfixgo/quickfix/log/screen"
 	"github.com/quickfixgo/quickfix/store/file"
 )
 
@@ -224,7 +223,7 @@ func InitFIXEngine(cfgPath string) error {
 	}
 
 	storeFactory := file.NewStoreFactory(settings)
-	logFactory := screen.NewLogFactory()
+	logFactory := quickfix.NewNullLogFactory()
 
 	app := App{}
 	initr, err := quickfix.NewInitiator(app, storeFactory, settings, logFactory)
