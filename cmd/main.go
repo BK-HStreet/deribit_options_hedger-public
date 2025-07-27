@@ -2,6 +2,7 @@ package main
 
 import (
 	"OptionsHedger/internal/auth"
+	"OptionsHedger/internal/data"
 	"OptionsHedger/internal/fix"
 	"OptionsHedger/internal/model"
 	"OptionsHedger/internal/strategy"
@@ -35,9 +36,8 @@ func main() {
 	if clientID == "" || clientSecret == "" {
 		log.Fatal("[AUTH] missing DERIBIT_CLIENT_ID or DERIBIT_CLIENT_SECRET")
 	}
-	log.Printf("[DEBUG] client_id: %s", clientID)
 
-	// 2) REST를 이용해 JWT 발급 (API Key 유효성 테스트용)
+	// 2) REST를 이용해 JWT 발급
 	_ = auth.FetchJWTToken(clientID, clientSecret)
 
 	// 3) Fetch BTC index price
@@ -50,10 +50,30 @@ func main() {
 	options := filterOptions(instruments, nearestExpiry, btcPrice)
 	log.Printf("[INFO] Selected %d options from expiry %s", len(options), nearestExpiry)
 
+	// ✅ FIX 모듈에 옵션 리스트 전달
+	fix.SetOptionSymbols(options)
+
 	var topics []string
 	for _, inst := range options {
 		topics = append(topics, fmt.Sprintf("book.%s.raw", inst))
 	}
+
+	// ✅ 채널 기반 QuoteStore + BoxSpreadEngine 초기화
+	store := data.NewQuoteStore()
+	engine := strategy.NewBoxSpreadEngine(store)
+	engine.Start()
+
+	// ✅ FIX 엔진에 QuoteStore 주입
+	fix.InitQuoteStore(store)
+
+	// ✅ BoxSpread 시그널 수신 시 주문 전송
+	go func() {
+		for sig := range engine.Signals() {
+			log.Printf("[ORDER] BoxSpread triggered: %s Bid=%.4f / %s Ask=%.4f",
+				sig.CallSym, sig.CallBid, sig.PutSym, sig.PutAsk)
+			// FIX 주문 로직 연결
+		}
+	}()
 
 	// 5) Initialize FIX engine
 	if err := fix.InitFIXEngine("config/quickfix.cfg"); err != nil {
@@ -61,16 +81,42 @@ func main() {
 	}
 	defer fix.StopFIXEngine()
 
-	token := auth.FetchJWTToken(clientID, clientSecret)
-	log.Printf("[DEBUG] Access Token: %s", token)
 	// 6) Connect to Deribit WebSocket (API Key 기반 인증)
 	wsclient.ConnectAndServe(
 		"wss://www.deribit.com/ws/api/v2",
 		topics,
 		func(d *model.Depth) {
-			d.Quantity = 1.0
-			if strategy.IsBoxOpportunity(d) {
-				fix.SendOrder(*d)
+			// ✅ 기본 수량 설정 (테스트용)
+			if d.BidQty == 0 {
+				d.BidQty = 1.0
+			}
+			if d.AskQty == 0 {
+				d.AskQty = 1.0
+			}
+
+			// ✅ 이전 값 유지용 캐시 조회
+			staticDepth := wsclient.GetDepthCache(d.Instrument)
+			if d.Bid == 0 && staticDepth != nil {
+				d.Bid = staticDepth.Bid
+				d.BidQty = staticDepth.BidQty
+			}
+			if d.Ask == 0 && staticDepth != nil {
+				d.Ask = staticDepth.Ask
+				d.AskQty = staticDepth.AskQty
+			}
+
+			// ✅ 캐시에 저장
+			wsclient.UpdateDepthCache(*d)
+
+			// ✅ 채널 기반 QuoteStore에 업데이트
+			if d.Bid > 0 && d.Ask > 0 {
+				store.Set(d.Instrument, d.Bid, d.Ask)
+			}
+
+			// ✅ 디버깅용 출력
+			if d.Bid > 0 && d.Ask > 0 {
+				log.Printf("[WS-DEPTH] %s | Bid=%.4f (Qty=%.2f) | Ask=%.4f (Qty=%.2f)",
+					d.Instrument, d.Bid, d.BidQty, d.Ask, d.AskQty)
 			}
 		},
 	)

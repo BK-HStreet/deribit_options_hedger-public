@@ -27,7 +27,7 @@ func AuthenticateWebSocket(ws *websocket.Conn) error {
 		},
 	}
 
-	log.Printf("[WS] Sending WS Auth request (client_id=%s)", clientID)
+	// log.Printf("[WS] Sending WS Auth request (client_id=%s)", clientID)
 	if err := ws.WriteJSON(req); err != nil {
 		log.Println("[WS] Auth request send failed:", err)
 		return err
