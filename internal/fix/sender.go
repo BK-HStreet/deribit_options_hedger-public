@@ -14,12 +14,7 @@ import (
 )
 
 func SendOrder(d model.Depth) {
-	sessID := quickfix.SessionID{
-		BeginString:  "FIX.4.4", // ✅ enum 대신 문자열로 고정
-		SenderCompID: "YOUR_SENDER",
-		TargetCompID: "DERIBIT_FIX",
-	}
-
+	// ✅ NewOrderSingle 생성
 	order := newordersingle.New(
 		field.NewClOrdID("BOX"+time.Now().Format("150405")),
 		field.NewSide(enum.Side_BUY),
@@ -27,13 +22,14 @@ func SendOrder(d model.Depth) {
 		field.NewOrdType(enum.OrdType_LIMIT),
 	)
 
-	// ✅ decimal 변환 적용
+	// ✅ 필드 설정
 	order.Set(field.NewSymbol(d.Instrument))
 	order.Set(field.NewOrderQty(decimal.NewFromFloat(d.Quantity), 0))
 	order.Set(field.NewPrice(decimal.NewFromFloat(d.Bid), 0))
 	order.Set(field.NewTimeInForce(enum.TimeInForce_IMMEDIATE_OR_CANCEL))
 
-	if err := quickfix.SendToTarget(order, sessID); err != nil {
+	// ✅ 세션 자동 선택 (quickfix.cfg 기반)
+	if err := quickfix.Send(order); err != nil {
 		log.Println("[FIX] SendOrder error:", err)
 	} else {
 		log.Printf("[FIX] Sent NewOrderSingle %s @ %.2f", d.Instrument, d.Bid)
