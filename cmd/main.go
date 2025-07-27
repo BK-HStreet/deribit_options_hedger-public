@@ -4,9 +4,7 @@ import (
 	"OptionsHedger/internal/auth"
 	"OptionsHedger/internal/data"
 	"OptionsHedger/internal/fix"
-	"OptionsHedger/internal/model"
 	"OptionsHedger/internal/strategy"
-	"OptionsHedger/internal/wsclient"
 
 	"encoding/json"
 	"fmt"
@@ -53,10 +51,10 @@ func main() {
 	// ✅ FIX 모듈에 옵션 리스트 전달
 	fix.SetOptionSymbols(options)
 
-	var topics []string
-	for _, inst := range options {
-		topics = append(topics, fmt.Sprintf("book.%s.raw", inst))
-	}
+	// var topics []string
+	// for _, inst := range options {
+	// 	topics = append(topics, fmt.Sprintf("book.%s.raw", inst))
+	// }
 
 	// ✅ 채널 기반 QuoteStore + BoxSpreadEngine 초기화
 	store := data.NewQuoteStore()
@@ -81,45 +79,9 @@ func main() {
 	}
 	defer fix.StopFIXEngine()
 
-	// 6) Connect to Deribit WebSocket (API Key 기반 인증)
-	wsclient.ConnectAndServe(
-		"wss://www.deribit.com/ws/api/v2",
-		topics,
-		func(d *model.Depth) {
-			// ✅ 기본 수량 설정 (테스트용)
-			if d.BidQty == 0 {
-				d.BidQty = 1.0
-			}
-			if d.AskQty == 0 {
-				d.AskQty = 1.0
-			}
+	// FIX 엔진은 비동기적으로 시세를 수신하므로 메인 고루틴을 대기 상태로 유지
+	select {}
 
-			// ✅ 이전 값 유지용 캐시 조회
-			staticDepth := wsclient.GetDepthCache(d.Instrument)
-			if d.Bid == 0 && staticDepth != nil {
-				d.Bid = staticDepth.Bid
-				d.BidQty = staticDepth.BidQty
-			}
-			if d.Ask == 0 && staticDepth != nil {
-				d.Ask = staticDepth.Ask
-				d.AskQty = staticDepth.AskQty
-			}
-
-			// ✅ 캐시에 저장
-			wsclient.UpdateDepthCache(*d)
-
-			// ✅ 채널 기반 QuoteStore에 업데이트
-			if d.Bid > 0 && d.Ask > 0 {
-				store.Set(d.Instrument, d.Bid, d.Ask)
-			}
-
-			// ✅ 디버깅용 출력
-			if d.Bid > 0 && d.Ask > 0 {
-				log.Printf("[WS-DEPTH] %s | Bid=%.4f (Qty=%.2f) | Ask=%.4f (Qty=%.2f)",
-					d.Instrument, d.Bid, d.BidQty, d.Ask, d.AskQty)
-			}
-		},
-	)
 }
 
 func fetchBTCPrice() float64 {

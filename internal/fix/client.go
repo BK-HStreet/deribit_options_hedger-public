@@ -87,7 +87,7 @@ func (App) FromApp(msg *quickfix.Message, id quickfix.SessionID) quickfix.Messag
 			store.Set(sym, bid, ask)
 		}
 
-		log.Printf("[FIX-DEPTH] %s | Bid=%.4f (Qty=%.2f) | Ask=%.4f (Qty=%.2f)",
+		log.Printf("[FIX-DEPTH] %s | Bid=%.4f (Qty=%.4f) | Ask=%.4f (Qty=%.4f)",
 			sym, bid, bidQty, ask, askQty)
 	}
 	return nil

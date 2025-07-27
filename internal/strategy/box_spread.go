@@ -43,6 +43,7 @@ func (e *BoxSpreadEngine) Start() {
 
 // ✅ 옵션 쌍을 평가하여 BoxSpread 조건 충족 시 시그널 전송
 func (e *BoxSpreadEngine) evaluate(quotes map[string]data.OptionQuote) {
+	return
 	for callSym, call := range quotes {
 		if !strings.HasSuffix(callSym, "-C") {
 			continue
