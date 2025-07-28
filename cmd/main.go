@@ -1,10 +1,10 @@
 package main
 
 import (
-	"OptionsHedger/internal/auth"
-	"OptionsHedger/internal/data"
-	"OptionsHedger/internal/fix"
-	"OptionsHedger/internal/strategy"
+	"Options_Hedger/internal/auth"
+	"Options_Hedger/internal/data"
+	"Options_Hedger/internal/fix"
+	"Options_Hedger/internal/strategy"
 
 	"encoding/json"
 	"fmt"

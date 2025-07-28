@@ -4,7 +4,7 @@ import (
 	"log"
 	"time"
 
-	"OptionsHedger/internal/model"
+	"Options_Hedger/internal/model"
 
 	"github.com/quickfixgo/enum"
 	"github.com/quickfixgo/field"

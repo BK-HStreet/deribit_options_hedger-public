@@ -1,4 +1,4 @@
-module OptionsHedger
+module Options_Hedger
 
 go 1.23.11
 

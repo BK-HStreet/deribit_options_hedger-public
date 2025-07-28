@@ -1,7 +1,7 @@
 package strategy
 
 import (
-	"OptionsHedger/internal/data"
+	"Options_Hedger/internal/data"
 	"log"
 )
 

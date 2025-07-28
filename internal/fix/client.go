@@ -1,8 +1,8 @@
 package fix
 
 import (
-	"OptionsHedger/internal/data"
-	"OptionsHedger/internal/strategy"
+	"Options_Hedger/internal/data"
+	"Options_Hedger/internal/strategy"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
