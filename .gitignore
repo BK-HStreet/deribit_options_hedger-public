@@ -2,9 +2,6 @@
 .env
 .env.*.local
 
-# QuickFIX 설정 (client_secret 등 민감 정보)
-config/quickfix.cfg
-
 # FIX 메시지 스토어
 /store/
 
