@@ -26,13 +26,13 @@ type App struct{}
 
 // ✅ 전역 선언: 옵션 심볼 리스트와 QuoteStore
 var optionSymbols []string
-var store *data.QuoteStore
+
 var engine *strategy.BoxSpreadEngine
 
-// ✅ 외부에서 QuoteStore를 주입
-func InitQuoteStore(s *data.QuoteStore) {
-	store = s
-}
+// // ✅ 외부에서 QuoteStore를 주입
+// func InitQuoteStore(s *data.QuoteStore) {
+// 	store = s
+// }
 
 func InitBoxEngine(e *strategy.BoxSpreadEngine) {
 	engine = e
@@ -54,17 +54,20 @@ func (App) OnLogon(id quickfix.SessionID) {
 		field.NewSubscriptionRequestType(enum.SubscriptionRequestType_SNAPSHOT_PLUS_UPDATES),
 		field.NewMarketDepth(1),
 	)
-	mdReq.Set(field.NewMDUpdateType(enum.MDUpdateType_INCREMENTAL_REFRESH))
 
-	// MDEntryTypes (Bid + Offer)
+	// Incremental Refresh + AggregatedBook
+	mdReq.Set(field.NewMDUpdateType(enum.MDUpdateType_INCREMENTAL_REFRESH))
+	mdReq.Set(field.NewAggregatedBook(true))
+
+	// MDEntryTypes (Bid + Offer만 요청)
 	mdEntryGroup := marketdatarequest.NewNoMDEntryTypesRepeatingGroup()
-	e1 := mdEntryGroup.Add()
-	e1.Set(field.NewMDEntryType(enum.MDEntryType_BID))
-	e2 := mdEntryGroup.Add()
-	e2.Set(field.NewMDEntryType(enum.MDEntryType_OFFER))
+	bidEntry := mdEntryGroup.Add()
+	bidEntry.Set(field.NewMDEntryType(enum.MDEntryType_BID))
+	askEntry := mdEntryGroup.Add()
+	askEntry.Set(field.NewMDEntryType(enum.MDEntryType_OFFER))
 	mdReq.SetGroup(mdEntryGroup)
 
-	// ✅ 모든 심볼 추가
+	// 옵션 심볼들 추가
 	symGroup := marketdatarequest.NewNoRelatedSymRepeatingGroup()
 	for _, sym := range optionSymbols {
 		entry := symGroup.Add()
@@ -72,6 +75,7 @@ func (App) OnLogon(id quickfix.SessionID) {
 	}
 	mdReq.SetGroup(symGroup)
 
+	// 요청 전송
 	if err := quickfix.SendToTarget(mdReq, id); err != nil {
 		log.Println("[FIX] MarketDataRequest send error:", err)
 	} else {
@@ -86,16 +90,17 @@ func (App) FromApp(msg *quickfix.Message, id quickfix.SessionID) quickfix.Messag
 	if msgType == "W" || msgType == "X" {
 		sym, bid, ask, bidQty, askQty := fastParseFIX(msg)
 
-		if sym != "" && store != nil {
-			store.Update(sym, bid, bidQty, ask, askQty)
+		if sym != "" {
+			if bid > 0 {
+				data.ApplyUpdate(sym, true, bid, bidQty)
+			}
+			if ask > 0 {
+				data.ApplyUpdate(sym, false, ask, askQty)
+			}
 
-			// benkim.. 아래 3줄 복원
-			// // ✅ BoxSpreadEngine 호출
-			// depth := store.Get(sym)
-			// engine.CheckOpportunity(depth) // 업데이트 직후 시그널 탐지
-
+			depth := data.GetBestQuote(sym)
 			log.Printf("[FIX-DEPTH] %s | Bid=%.4f (Qty=%.2f) | Ask=%.4f (Qty=%.2f)",
-				sym, bid, bidQty, ask, askQty)
+				sym, depth.BidPrice, depth.BidQty, depth.AskPrice, depth.AskQty)
 		}
 	}
 	return nil
@@ -133,25 +138,27 @@ func (App) ToAdmin(msg *quickfix.Message, id quickfix.SessionID) {
 		msg.Body.SetField(quickfix.Tag(96), quickfix.FIXString(rawData))
 		msg.Body.SetField(quickfix.Tag(553), quickfix.FIXString(clientID))
 		msg.Body.SetField(quickfix.Tag(554), quickfix.FIXString(password))
+		log.Println("[FIX-SEND]", msg.String())
 	}
 }
 
 func (App) FromAdmin(msg *quickfix.Message, id quickfix.SessionID) quickfix.MessageRejectError {
 	return nil
 }
-
 func fastParseFIX(msg *quickfix.Message) (string, float64, float64, float64, float64) {
 	var sym string
-	var bid, ask, bidQty, askQty float64
+	var bestBid, bestAsk, bidQty, askQty float64
 
 	msgType, _ := msg.Header.GetString(quickfix.Tag(35))
 	switch msgType {
 	case "W": // Snapshot
 		snap := marketdatasnapshotfullrefresh.FromMessage(msg)
+
 		symField := new(field.SymbolField)
 		if err := snap.Get(symField); err == nil {
 			sym = symField.Value()
 		}
+
 		group, _ := snap.GetNoMDEntries()
 		for i := 0; i < group.Len(); i++ {
 			entry := group.Get(i)
@@ -167,18 +174,20 @@ func fastParseFIX(msg *quickfix.Message) (string, float64, float64, float64, flo
 
 			switch etype.Value() {
 			case enum.MDEntryType_BID:
-				bid = p
-				bidQty = q
+				if p > bestBid { // ✅ 가장 높은 Bid 유지
+					bestBid = p
+					bidQty = q
+				}
 			case enum.MDEntryType_OFFER:
-				ask = p
-				askQty = q
+				if bestAsk == 0 || p < bestAsk { // ✅ 가장 낮은 Ask 유지
+					bestAsk = p
+					askQty = q
+				}
 			}
 		}
 
-	case "X": // Incremental updates
+	case "X":
 		incr := marketdataincrementalrefresh.FromMessage(msg)
-
-		// ✅ 메시지 전체에서 Symbol(55) 먼저 읽기
 		symField := new(field.SymbolField)
 		if err := incr.Get(symField); err == nil {
 			sym = symField.Value()
@@ -190,29 +199,30 @@ func fastParseFIX(msg *quickfix.Message) (string, float64, float64, float64, flo
 			etype := new(field.MDEntryTypeField)
 			price := new(field.MDEntryPxField)
 			qty := new(field.MDEntrySizeField)
+			action := new(field.MDUpdateActionField)
+
 			_ = entry.Get(etype)
 			_ = entry.Get(price)
 			_ = entry.Get(qty)
+			_ = entry.Get(action)
 
 			p, _ := price.Value().Float64()
 			q, _ := qty.Value().Float64()
 
+			if action.Value() == enum.MDUpdateAction_DELETE {
+				q = 0
+			}
+
 			switch etype.Value() {
 			case enum.MDEntryType_BID:
-				if bid == 0 { // ✅ 첫 Bid만 저장
-					bid = p
-					bidQty = q
-				}
+				data.ApplyUpdate(sym, true, p, q)
 			case enum.MDEntryType_OFFER:
-				if ask == 0 { // ✅ 첫 Ask만 저장
-					ask = p
-					askQty = q
-				}
+				data.ApplyUpdate(sym, false, p, q)
 			}
 		}
 	}
 
-	return sym, bid, ask, bidQty, askQty
+	return sym, bestBid, bestAsk, bidQty, askQty
 }
 
 var initiator *quickfix.Initiator

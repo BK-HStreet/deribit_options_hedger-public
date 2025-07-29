@@ -46,25 +46,31 @@ func main() {
 	instruments := fetchInstruments()
 	nearestExpiry := findNearestExpiry(instruments)
 	options := filterOptions(instruments, nearestExpiry, btcPrice)
+	// ✅ data.MaxOptions 기준으로 잘라서 제한
+	if len(options) > data.MaxOptions {
+		options = options[:data.MaxOptions]
+	}
+
 	log.Printf("[INFO] Selected %d options from expiry %s", len(options), nearestExpiry)
 
 	// ✅ FIX 모듈에 옵션 리스트 전달
 	fix.SetOptionSymbols(options)
 
-	// ✅ QuoteStore + BoxSpreadEngine 초기화
-	store := data.NewQuoteStore(options)
-	engine := strategy.NewBoxSpreadEngine(store)
+	// ✅ 이벤트 채널 생성
+	updateCh := make(chan data.DepthEntry, 1024)
 
-	// ✅ FIX 엔진에 QuoteStore 주입
-	fix.InitQuoteStore(store)
+	// ✅ OrderBook 초기화
+	data.InitOrderBooks(options, updateCh)
+
+	// ✅ BoxSpreadEngine 초기화
+	engine := strategy.NewBoxSpreadEngine(updateCh)
 	fix.InitBoxEngine(engine)
 
-	// ✅ BoxSpread 시그널 수신 시 주문 전송
+	// ✅ BoxSpread 시그널 수신
 	go func() {
 		for sig := range engine.Signals() {
 			log.Printf("[ORDER] BoxSpread triggered: %s Bid=%.4f / %s Ask=%.4f",
 				sig.CallSym, sig.CallBid, sig.PutSym, sig.PutAsk)
-			// TODO: FIX 주문 로직 연결
 		}
 	}()
 
@@ -147,8 +153,6 @@ func findNearestExpiry(instruments []string) string {
 	}
 	return list[0].label
 }
-
-// Filter 40 options closest to ATM for the nearest expiry
 func filterOptions(instruments []string, expiry string, atmPrice float64) []string {
 	type opt struct {
 		name   string
@@ -168,12 +172,9 @@ func filterOptions(instruments []string, expiry string, atmPrice float64) []stri
 	sort.Slice(list, func(i, j int) bool {
 		return abs(list[i].strike-atmPrice) < abs(list[j].strike-atmPrice)
 	})
-	limit := 1
-	if len(list) < limit {
-		limit = len(list)
-	}
-	out := make([]string, limit)
-	for i := 0; i < limit; i++ {
+
+	out := make([]string, len(list))
+	for i := range list {
 		out[i] = list[i].name
 	}
 	return out
