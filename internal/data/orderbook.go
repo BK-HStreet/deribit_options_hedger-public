@@ -5,7 +5,7 @@ import (
 	"unsafe"
 )
 
-const MaxOptions = 1
+const MaxOptions = 40
 const cacheLine = 64
 
 // DepthEntry holds current best bid/ask snapshot (cache-line aligned)
