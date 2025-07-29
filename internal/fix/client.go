@@ -219,7 +219,7 @@ var initiator *quickfix.Initiator
 
 // InitFIXEngine initializes the FIX engine with the correct config path.
 func InitFIXEngine(cfgPath string) error {
-	absPath, err := filepath.Abs(cfgPath) // 현재 실행 위치 기준 절대 경로
+	absPath, err := filepath.Abs(cfgPath)
 	if err != nil {
 		return err
 	}
