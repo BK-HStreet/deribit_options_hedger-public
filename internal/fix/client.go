@@ -9,7 +9,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"time"
 
@@ -220,9 +219,10 @@ var initiator *quickfix.Initiator
 
 // InitFIXEngine initializes the FIX engine with the correct config path.
 func InitFIXEngine(cfgPath string) error {
-	_, b, _, _ := runtime.Caller(0)
-	root := filepath.Join(filepath.Dir(b), "../../")
-	absPath := filepath.Join(root, cfgPath)
+	absPath, err := filepath.Abs(cfgPath) // 현재 실행 위치 기준 절대 경로
+	if err != nil {
+		return err
+	}
 
 	f, err := os.Open(absPath)
 	if err != nil {
