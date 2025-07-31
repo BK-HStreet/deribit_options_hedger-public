@@ -1,6 +1,7 @@
 package data
 
 import (
+	"math"
 	"sync/atomic"
 	"unsafe"
 )
@@ -8,7 +9,7 @@ import (
 const MaxOptions = 40
 const cacheLine = 64
 
-// DepthEntry holds current best bid/ask snapshot (cache-line aligned)
+// DepthEntry는 cache-line에 맞춰 정렬된 best bid/ask 저장용 구조체
 type DepthEntry struct {
 	Instrument string
 	BidPrice   float64
@@ -18,81 +19,41 @@ type DepthEntry struct {
 	_          [cacheLine - unsafe.Sizeof("") - 4*8]byte
 }
 
-// OrderBook stores all levels for a single symbol
-type OrderBook struct {
-	Bids map[float64]float64 // price -> qty
-	Asks map[float64]float64 // price -> qty
-	Best atomic.Pointer[DepthEntry]
-}
-
+// lock-free BestQuote 배열
 var (
-	books       [MaxOptions]*OrderBook
 	symbolIndex = make(map[string]int)
+	symbols     []string
+	books       [MaxOptions]DepthEntry
 	updateCh    chan DepthEntry
 )
 
-// InitOrderBooks initializes all orderbooks for given symbols
-func InitOrderBooks(symbols []string, ch chan DepthEntry) {
+// InitOrderBooks initializes all DepthEntry slots and index mapping
+func InitOrderBooks(syms []string, ch chan DepthEntry) {
 	updateCh = ch
-	for i, sym := range symbols {
-		ob := &OrderBook{
-			Bids: make(map[float64]float64, 16),
-			Asks: make(map[float64]float64, 16),
-		}
-		entry := &DepthEntry{Instrument: sym}
-		ob.Best.Store(entry)
-		books[i] = ob
-		symbolIndex[sym] = i
+	symbols = syms
+	for i, s := range syms {
+		symbolIndex[s] = i
+		books[i].Instrument = s
 	}
 }
 
-// ApplyUpdate updates a price level and recomputes best bid/ask
+// ApplyUpdate applies best bid/ask update using atomic writes
 func ApplyUpdate(symbol string, isBid bool, price, qty float64) {
 	idx, ok := symbolIndex[symbol]
 	if !ok {
 		return
 	}
-	ob := books[idx]
+	entry := &books[idx]
 
 	if isBid {
-		if qty == 0 {
-			delete(ob.Bids, price)
-		} else {
-			ob.Bids[price] = qty
-		}
+		atomic.StoreUint64((*uint64)(unsafe.Pointer(&entry.BidPrice)), math.Float64bits(price))
+		atomic.StoreUint64((*uint64)(unsafe.Pointer(&entry.BidQty)), math.Float64bits(qty))
 	} else {
-		if qty == 0 {
-			delete(ob.Asks, price)
-		} else {
-			ob.Asks[price] = qty
-		}
+		atomic.StoreUint64((*uint64)(unsafe.Pointer(&entry.AskPrice)), math.Float64bits(price))
+		atomic.StoreUint64((*uint64)(unsafe.Pointer(&entry.AskQty)), math.Float64bits(qty))
 	}
 
-	var bestBid, bestAsk float64
-	var bidQty, askQty float64
-
-	for p, q := range ob.Bids {
-		if p > bestBid {
-			bestBid = p
-			bidQty = q
-		}
-	}
-	for p, q := range ob.Asks {
-		if bestAsk == 0 || p < bestAsk {
-			bestAsk = p
-			askQty = q
-		}
-	}
-
-	entry := &DepthEntry{
-		Instrument: symbol,
-		BidPrice:   bestBid,
-		BidQty:     bidQty,
-		AskPrice:   bestAsk,
-		AskQty:     askQty,
-	}
-	ob.Best.Store(entry)
-
+	// Non-blocking event push
 	if updateCh != nil {
 		select {
 		case updateCh <- *entry:
@@ -101,16 +62,22 @@ func ApplyUpdate(symbol string, isBid bool, price, qty float64) {
 	}
 }
 
-// GetBestQuote returns the current best bid/ask for a symbol
+// GetBestQuote returns atomic snapshot of best bid/ask for a symbol
 func GetBestQuote(symbol string) DepthEntry {
 	idx, ok := symbolIndex[symbol]
 	if !ok {
 		return DepthEntry{}
 	}
-	ob := books[idx]
-	ptr := ob.Best.Load()
-	if ptr != nil {
-		return *ptr
+	entry := &books[idx]
+	return DepthEntry{
+		Instrument: entry.Instrument,
+		BidPrice:   math.Float64frombits(atomic.LoadUint64((*uint64)(unsafe.Pointer(&entry.BidPrice)))),
+		BidQty:     math.Float64frombits(atomic.LoadUint64((*uint64)(unsafe.Pointer(&entry.BidQty)))),
+		AskPrice:   math.Float64frombits(atomic.LoadUint64((*uint64)(unsafe.Pointer(&entry.AskPrice)))),
+		AskQty:     math.Float64frombits(atomic.LoadUint64((*uint64)(unsafe.Pointer(&entry.AskQty)))),
 	}
-	return DepthEntry{}
+}
+
+func Symbols() []string {
+	return symbols
 }

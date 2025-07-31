@@ -66,6 +66,9 @@ func main() {
 	engine := strategy.NewBoxSpreadEngine(updateCh)
 	fix.InitBoxEngine(engine)
 
+	// ✅ 엔진 런타임 시작
+	go engine.Run()
+
 	// ✅ BoxSpread 시그널 수신
 	go func() {
 		for sig := range engine.Signals() {

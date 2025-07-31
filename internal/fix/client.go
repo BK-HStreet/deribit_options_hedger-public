@@ -85,6 +85,7 @@ func (App) OnLogon(id quickfix.SessionID) {
 
 func (App) OnLogout(id quickfix.SessionID)                           {}
 func (App) ToApp(msg *quickfix.Message, id quickfix.SessionID) error { return nil }
+
 func (App) FromApp(msg *quickfix.Message, id quickfix.SessionID) quickfix.MessageRejectError {
 	msgType, _ := msg.Header.GetString(quickfix.Tag(35))
 	if msgType == "W" || msgType == "X" {
@@ -98,7 +99,15 @@ func (App) FromApp(msg *quickfix.Message, id quickfix.SessionID) quickfix.Messag
 				data.ApplyUpdate(sym, false, ask, askQty)
 			}
 
+			// ✅ 최신 DepthEntry 읽어서 BoxSpreadEngine에 전달
 			depth := data.GetBestQuote(sym)
+			if engine != nil {
+				select {
+				case engine.Updates() <- depth:
+				default:
+				}
+			}
+
 			log.Printf("[FIX-DEPTH] %s | Bid=%.4f (Qty=%.2f) | Ask=%.4f (Qty=%.2f)",
 				sym, depth.BidPrice, depth.BidQty, depth.AskPrice, depth.AskQty)
 		}
