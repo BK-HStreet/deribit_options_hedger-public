@@ -2,7 +2,6 @@ package strategy
 
 import (
 	"Options_Hedger/internal/data"
-	"log"
 	"math"
 	"strconv"
 	"strings"
@@ -56,8 +55,8 @@ func alreadySignaled(key string) bool {
 // ✅ Incremental 기반 박스 스프레드 탐지 benkim..밀리는거 없는지 탐지 필요
 func (e *BoxSpreadEngine) Run() {
 	for depth := range e.updates {
-		start := time.Now()
-		triggered := false // ✅ 탐지 여부 플래그
+		// start := time.Now()
+		// triggered := false // ✅ 탐지 여부 플래그
 
 		parts := strings.Split(depth.Instrument, "-")
 		if len(parts) < 3 {
@@ -80,19 +79,20 @@ func (e *BoxSpreadEngine) Run() {
 
 			if isCall && !otherIsCall {
 				if e.checkBoxSpread(depth, other, strike, otherStrike, expiry) {
-					triggered = true
+					// triggered = true
 				}
 			} else if !isCall && otherIsCall {
 				if e.checkBoxSpread(other, depth, otherStrike, strike, expiry) {
-					triggered = true
+					// triggered = true
 				}
 			}
 		}
 
-		if triggered {
-			elapsed := time.Since(start).Microseconds()
-			log.Printf("[PERF] %s incremental scan took %dµs", depth.Instrument, elapsed)
-		}
+		// benkim..소요시간체크
+		// if triggered {
+		// 	elapsed := time.Since(start).Microseconds()
+		// 	log.Printf("[PERF] %s incremental scan took %dµs", depth.Instrument, elapsed)
+		// }
 	}
 }
 
