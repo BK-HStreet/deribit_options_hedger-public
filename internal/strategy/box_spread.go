@@ -96,7 +96,6 @@ func (e *BoxSpreadEngine) Run() {
 	}
 }
 
-// ✅ 조건 검증 + Dedup 적용
 func (e *BoxSpreadEngine) checkBoxSpread(call data.DepthEntry, put data.DepthEntry, callStrike, putStrike float64, expiry string) bool {
 	low := math.Min(callStrike, putStrike)
 	high := math.Max(callStrike, putStrike)
@@ -109,17 +108,23 @@ func (e *BoxSpreadEngine) checkBoxSpread(call data.DepthEntry, put data.DepthEnt
 		return false
 	}
 
-	totalCost := (call.AskPrice + put.AskPrice) - (call.BidPrice + put.BidPrice)
+	// ✅ USD 환산 (BTC 프리미엄 × Index Price)
+	usdCallAsk := call.AskPrice * data.GetIndexPrice()
+	usdCallBid := call.BidPrice * data.GetIndexPrice()
+	usdPutAsk := put.AskPrice * data.GetIndexPrice()
+	usdPutBid := put.BidPrice * data.GetIndexPrice()
+
+	totalCost := (usdCallAsk + usdPutAsk) - (usdCallBid + usdPutBid)
+
 	if totalCost < (high - low) {
 		sig := Signal{
 			CallSym: call.Instrument,
 			PutSym:  put.Instrument,
-			CallBid: call.AskPrice,
-			PutAsk:  put.AskPrice,
+			CallBid: usdCallAsk,
+			PutAsk:  usdPutAsk,
 		}
 		select {
 		case e.signals <- sig:
-			// log.Printf("[SIGNAL] BoxSpread FOUND | Low=%.0f High=%.0f Premium=%.4f", low, high, totalCost)
 		default:
 		}
 		return true

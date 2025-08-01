@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -85,21 +86,38 @@ func (App) OnLogon(id quickfix.SessionID) {
 
 func (App) OnLogout(id quickfix.SessionID)                           {}
 func (App) ToApp(msg *quickfix.Message, id quickfix.SessionID) error { return nil }
-
 func (App) FromApp(msg *quickfix.Message, id quickfix.SessionID) quickfix.MessageRejectError {
+	log.Printf("[FIX-RAW-MSG] %s", msg.String())
+
+	// Tag 810 직접 접근
+	if val, err := msg.Body.GetString(810); err == nil {
+		log.Printf("[DEBUG-810-DIRECT] Tag810 raw='%s'", val)
+	} else {
+		log.Printf("[DEBUG-810-DIRECT] Tag810 not found: %v", err)
+	}
+
+	// UnderlyingPxField 접근
+	var uPx field.UnderlyingPxField
+	if err := msg.Body.Get(&uPx); err == nil {
+		idxVal, _ := uPx.Float64()
+		log.Printf("[DEBUG-810-UNDERLYINGPX] UnderlyingPx=%.2f", idxVal)
+	} else {
+		log.Printf("[DEBUG-810-UNDERLYINGPX] not found: %v", err)
+	}
+
 	msgType, _ := msg.Header.GetString(quickfix.Tag(35))
 	if msgType == "W" || msgType == "X" {
-		sym, bid, ask, bidQty, askQty := fastParseFIX(msg)
+		sym, bid, ask, bidQty, askQty, index, delBid, delAsk := fastParseFIX(msg)
+		log.Printf("[DEBUG-APPLY] %s Bid=%.4f Ask=%.4f Index=%.2f", sym, bid, ask, index)
 
 		if sym != "" {
-			if bid > 0 {
-				data.ApplyUpdate(sym, true, bid, bidQty)
+			if bid > 0 || delBid {
+				data.ApplyUpdate(sym, true, bid, bidQty, index)
 			}
-			if ask > 0 {
-				data.ApplyUpdate(sym, false, ask, askQty)
+			if ask > 0 || delAsk {
+				data.ApplyUpdate(sym, false, ask, askQty, index)
 			}
 
-			// ✅ 최신 DepthEntry 읽어서 BoxSpreadEngine에 전달
 			depth := data.GetBestQuote(sym)
 			if engine != nil {
 				select {
@@ -108,8 +126,8 @@ func (App) FromApp(msg *quickfix.Message, id quickfix.SessionID) quickfix.Messag
 				}
 			}
 
-			log.Printf("[FIX-DEPTH] %s | Bid=%.4f (Qty=%.2f) | Ask=%.4f (Qty=%.2f)",
-				sym, depth.BidPrice, depth.BidQty, depth.AskPrice, depth.AskQty)
+			log.Printf("[FIX-DEPTH] %s | Bid=%.4f (Qty=%.2f) | Ask=%.4f (Qty=%.2f) | Index=%.2f",
+				sym, depth.BidPrice, depth.BidQty, depth.AskPrice, depth.AskQty, index)
 		}
 	}
 	return nil
@@ -154,15 +172,25 @@ func (App) ToAdmin(msg *quickfix.Message, id quickfix.SessionID) {
 func (App) FromAdmin(msg *quickfix.Message, id quickfix.SessionID) quickfix.MessageRejectError {
 	return nil
 }
-func fastParseFIX(msg *quickfix.Message) (string, float64, float64, float64, float64) {
+
+func fastParseFIX(msg *quickfix.Message) (string, float64, float64, float64, float64, float64, bool, bool) {
 	var sym string
 	var bestBid, bestAsk, bidQty, askQty float64
+	idxPrice := math.NaN()
+	var delBid, delAsk bool
+
+	// ✅ 메시지 Body에서 UnderlyingPx (810) 읽기
+	var uPx field.UnderlyingPxField
+	if err := msg.Body.Get(&uPx); err == nil {
+		if v, ok := uPx.Value().Float64(); ok && v > 0 {
+			idxPrice = v
+		}
+	}
 
 	msgType, _ := msg.Header.GetString(quickfix.Tag(35))
 	switch msgType {
-	case "W": // Snapshot
+	case "W":
 		snap := marketdatasnapshotfullrefresh.FromMessage(msg)
-
 		symField := new(field.SymbolField)
 		if err := snap.Get(symField); err == nil {
 			sym = symField.Value()
@@ -174,6 +202,7 @@ func fastParseFIX(msg *quickfix.Message) (string, float64, float64, float64, flo
 			etype := new(field.MDEntryTypeField)
 			price := new(field.MDEntryPxField)
 			qty := new(field.MDEntrySizeField)
+
 			_ = entry.Get(etype)
 			_ = entry.Get(price)
 			_ = entry.Get(qty)
@@ -183,12 +212,12 @@ func fastParseFIX(msg *quickfix.Message) (string, float64, float64, float64, flo
 
 			switch etype.Value() {
 			case enum.MDEntryType_BID:
-				if p > bestBid { // ✅ 가장 높은 Bid 유지
+				if p > bestBid {
 					bestBid = p
 					bidQty = q
 				}
 			case enum.MDEntryType_OFFER:
-				if bestAsk == 0 || p < bestAsk { // ✅ 가장 낮은 Ask 유지
+				if bestAsk == 0 || p < bestAsk {
 					bestAsk = p
 					askQty = q
 				}
@@ -220,18 +249,25 @@ func fastParseFIX(msg *quickfix.Message) (string, float64, float64, float64, flo
 
 			if action.Value() == enum.MDUpdateAction_DELETE {
 				q = 0
+				if etype.Value() == enum.MDEntryType_BID {
+					delBid = true
+				} else if etype.Value() == enum.MDEntryType_OFFER {
+					delAsk = true
+				}
 			}
 
 			switch etype.Value() {
 			case enum.MDEntryType_BID:
-				data.ApplyUpdate(sym, true, p, q)
+				bestBid = p
+				bidQty = q
 			case enum.MDEntryType_OFFER:
-				data.ApplyUpdate(sym, false, p, q)
+				bestAsk = p
+				askQty = q
 			}
 		}
 	}
 
-	return sym, bestBid, bestAsk, bidQty, askQty
+	return sym, bestBid, bestAsk, bidQty, askQty, idxPrice, delBid, delAsk
 }
 
 var initiator *quickfix.Initiator

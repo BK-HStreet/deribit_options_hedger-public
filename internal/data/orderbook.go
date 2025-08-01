@@ -9,7 +9,6 @@ import (
 const MaxOptions = 40
 const cacheLine = 64
 
-// DepthEntry는 cache-line에 맞춰 정렬된 best bid/ask 저장용 구조체
 type DepthEntry struct {
 	Instrument string
 	BidPrice   float64
@@ -19,15 +18,14 @@ type DepthEntry struct {
 	_          [cacheLine - unsafe.Sizeof("") - 4*8]byte
 }
 
-// lock-free BestQuote 배열
 var (
-	symbolIndex = make(map[string]int)
-	symbols     []string
-	books       [MaxOptions]DepthEntry
-	updateCh    chan DepthEntry
+	symbolIndex      = make(map[string]int)
+	symbols          []string
+	books            [MaxOptions]DepthEntry
+	updateCh         chan DepthEntry
+	atomicIndexPrice uint64 // ✅ 글로벌 BTC Index Price (USD)
 )
 
-// InitOrderBooks initializes all DepthEntry slots and index mapping
 func InitOrderBooks(syms []string, ch chan DepthEntry) {
 	updateCh = ch
 	symbols = syms
@@ -37,8 +35,17 @@ func InitOrderBooks(syms []string, ch chan DepthEntry) {
 	}
 }
 
-// ApplyUpdate applies best bid/ask update using atomic writes
-func ApplyUpdate(symbol string, isBid bool, price, qty float64) {
+// ✅ 글로벌 IndexPrice 저장
+func SetIndexPrice(v float64) {
+	atomic.StoreUint64(&atomicIndexPrice, math.Float64bits(v))
+}
+
+// ✅ 글로벌 IndexPrice 읽기
+func GetIndexPrice() float64 {
+	return math.Float64frombits(atomic.LoadUint64(&atomicIndexPrice))
+}
+
+func ApplyUpdate(symbol string, isBid bool, price, qty, idxPrice float64) {
 	idx, ok := symbolIndex[symbol]
 	if !ok {
 		return
@@ -53,7 +60,11 @@ func ApplyUpdate(symbol string, isBid bool, price, qty float64) {
 		atomic.StoreUint64((*uint64)(unsafe.Pointer(&entry.AskQty)), math.Float64bits(qty))
 	}
 
-	// Non-blocking event push
+	// ✅ IndexPrice 갱신: NaN이거나 0 이하일 경우 갱신하지 않음
+	if !math.IsNaN(idxPrice) && idxPrice > 0 {
+		SetIndexPrice(idxPrice)
+	}
+
 	if updateCh != nil {
 		select {
 		case updateCh <- *entry:
@@ -62,7 +73,6 @@ func ApplyUpdate(symbol string, isBid bool, price, qty float64) {
 	}
 }
 
-// GetBestQuote returns atomic snapshot of best bid/ask for a symbol
 func GetBestQuote(symbol string) DepthEntry {
 	idx, ok := symbolIndex[symbol]
 	if !ok {
