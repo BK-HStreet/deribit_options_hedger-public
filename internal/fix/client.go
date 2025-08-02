@@ -24,23 +24,13 @@ import (
 // App implements quickfix.Application
 type App struct{}
 
-// ✅ 전역 선언: 옵션 심볼 리스트와 QuoteStore
 var optionSymbols []string
-
 var engine *strategy.BoxSpreadEngine
-
-// var idxVal float64
-
-// // ✅ 외부에서 QuoteStore를 주입
-// func InitQuoteStore(s *data.QuoteStore) {
-// 	store = s
-// }
 
 func InitBoxEngine(e *strategy.BoxSpreadEngine) {
 	engine = e
 }
 
-// ✅ 옵션 심볼 리스트 설정
 func SetOptionSymbols(symbols []string) {
 	optionSymbols = symbols
 }
@@ -50,18 +40,16 @@ func (App) OnCreate(id quickfix.SessionID) {}
 func (App) OnLogon(id quickfix.SessionID) {
 	log.Println("[FIX] >>>> OnLogon received from server!")
 
-	// MarketDataRequest 생성
+	// ✅ MarketDataRequest 생성
 	mdReq := marketdatarequest.New(
 		field.NewMDReqID("BTC_OPTIONS"),
 		field.NewSubscriptionRequestType(enum.SubscriptionRequestType_SNAPSHOT_PLUS_UPDATES),
 		field.NewMarketDepth(1),
 	)
-
-	// Incremental Refresh + AggregatedBook
 	mdReq.Set(field.NewMDUpdateType(enum.MDUpdateType_INCREMENTAL_REFRESH))
 	mdReq.Set(field.NewAggregatedBook(true))
 
-	// MDEntryTypes (Bid + Offer만 요청)
+	// ✅ MDEntryTypes (Bid + Offer)
 	mdEntryGroup := marketdatarequest.NewNoMDEntryTypesRepeatingGroup()
 	bidEntry := mdEntryGroup.Add()
 	bidEntry.Set(field.NewMDEntryType(enum.MDEntryType_BID))
@@ -69,19 +57,23 @@ func (App) OnLogon(id quickfix.SessionID) {
 	askEntry.Set(field.NewMDEntryType(enum.MDEntryType_OFFER))
 	mdReq.SetGroup(mdEntryGroup)
 
-	// 옵션 심볼들 추가
+	// ✅ 옵션 심볼 + BTC Index 추가
 	symGroup := marketdatarequest.NewNoRelatedSymRepeatingGroup()
 	for _, sym := range optionSymbols {
 		entry := symGroup.Add()
 		entry.Set(field.NewSymbol(sym))
 	}
+
+	// ✅ BTC-USD Index 심볼 추가 (IndexPrice 수신)
+	idxEntry := symGroup.Add()
+	idxEntry.Set(field.NewSymbol("BTC_USD_INDEX"))
 	mdReq.SetGroup(symGroup)
 
-	// 요청 전송
+	// ✅ 요청 전송
 	if err := quickfix.SendToTarget(mdReq, id); err != nil {
 		log.Println("[FIX] MarketDataRequest send error:", err)
 	} else {
-		log.Println("[FIX] MarketDataRequest sent for options")
+		log.Println("[FIX] MarketDataRequest sent for options + BTC-USD Index")
 	}
 }
 
@@ -92,31 +84,34 @@ func (App) FromApp(msg *quickfix.Message, id quickfix.SessionID) quickfix.Messag
 	msgType, _ := msg.Header.GetString(quickfix.Tag(35))
 	seqNum, _ := msg.Header.GetString(quickfix.Tag(34))
 
-	raw := msg.String()
-	log.Printf("[FIX-RAW] MsgType=%s Seq=%s Raw=%s", msgType, seqNum, raw)
+	// raw := msg.String()
+	// log.Printf("[FIX-RAW] MsgType=%s Seq=%s Raw=%s", msgType, seqNum, raw)
 
 	var idxPrice float64
 
-	// ✅ Tag 810 (UnderlyingPx) 우선 확인
-	var idxPriceField quickfix.FIXFloat
-	if err := msg.Body.GetField(810, &idxPriceField); err == nil {
-		idxPrice = float64(idxPriceField)
+	// ✅ Tag 810 (UnderlyingPx) 먼저 확인
+	var idxField quickfix.FIXFloat
+	if err := msg.Body.GetField(810, &idxField); err == nil {
+		idxPrice = float64(idxField)
 		data.SetIndexPrice(idxPrice)
-		log.Printf("[DEBUG-810] IndexPrice=%.2f MsgType=%s Seq=%s", idxPrice, msgType, seqNum)
+		// log.Printf("[DEBUG-810] IndexPrice=%.2f MsgType=%s Seq=%s", idxPrice, msgType, seqNum)
+	} else {
+		raw := msg.String()
+		log.Printf("[FIX-RAW non] MsgType=%s Seq=%s Raw=%s", msgType, seqNum, raw)
+		log.Printf("[DEBUG-810 non] IndexPrice=%.2f MsgType=%s Seq=%s", idxPrice, msgType, seqNum)
 	}
 
-	// ✅ Market Data Snapshot(W)/Incremental(X)에서 Tag 44 (IndexPrice) 탐색
+	// ✅ Snapshot/Incremental에서 Tag 44 (IndexPrice) 추출
 	if msgType == "W" || msgType == "X" {
 		group := quickfix.NewRepeatingGroup(268,
 			quickfix.GroupTemplate{
 				quickfix.GroupElement(269), // MDEntryType
-				quickfix.GroupElement(44),  // Price
+				quickfix.GroupElement(44),  // Price (Index)
 			})
 
 		if err := msg.Body.GetGroup(group); err == nil {
 			for i := 0; i < group.Len(); i++ {
 				entry := group.Get(i)
-
 				var mdType quickfix.FIXString
 				if err := entry.GetField(269, &mdType); err == nil && string(mdType) == "2" {
 					var px quickfix.FIXFloat
@@ -130,15 +125,22 @@ func (App) FromApp(msg *quickfix.Message, id quickfix.SessionID) quickfix.Messag
 		}
 	}
 
-	// ✅ 새로운 IndexPrice가 없으면 마지막 값 사용
+	// ✅ 새로운 IndexPrice가 없으면 마지막 값 유지
 	if idxPrice == 0 {
 		idxPrice = data.GetIndexPrice()
 		log.Printf("[DEBUG-INDEX] No new index, using last=%.2f MsgType=%s Seq=%s", idxPrice, msgType, seqNum)
 	}
 
-	// ✅ Bid/Ask 업데이트
+	// ✅ Bid/Ask 처리
 	if msgType == "W" || msgType == "X" {
 		sym, bid, ask, bidQty, askQty, delBid, delAsk := fastParseFIX(msg)
+
+		// BTC-USD Index 메시지는 시세 업데이트 제외
+		if sym == "BTC-USD" {
+			log.Printf("[DEBUG-INDEX-ONLY] Seq=%s Index=%.2f", seqNum, idxPrice)
+			return nil
+		}
+
 		log.Printf("[DEBUG-APPLY] Seq=%s Sym=%s Bid=%.4f Ask=%.4f Index=%.2f", seqNum, sym, bid, ask, idxPrice)
 
 		if sym != "" {
@@ -159,22 +161,15 @@ func (App) ToAdmin(msg *quickfix.Message, id quickfix.SessionID) {
 	if msgType == "A" {
 		clientID := os.Getenv("DERIBIT_CLIENT_ID")
 		clientSecret := os.Getenv("DERIBIT_CLIENT_SECRET")
-
-		// ✅ Timestamp (strictly increasing, ms)
 		timestamp := strconv.FormatInt(time.Now().UnixMilli(), 10)
 
-		// ✅ 32-byte cryptographically secure random nonce
 		nonce := make([]byte, 32)
 		_, _ = rand.Read(nonce)
-
-		// ✅ Standard Base64 encoding
 		encodedNonce := base64.StdEncoding.EncodeToString(nonce)
 
-		// ✅ RawData = timestamp.nonce
 		rawData := timestamp + "." + encodedNonce
 		rawConcat := rawData + clientSecret
 
-		// ✅ SHA256(rawData + secret) -> Base64
 		h := sha256.New()
 		h.Write([]byte(rawConcat))
 		passwordHash := h.Sum(nil)
@@ -284,7 +279,6 @@ func fastParseFIX(msg *quickfix.Message) (string, float64, float64, float64, flo
 
 var initiator *quickfix.Initiator
 
-// InitFIXEngine initializes the FIX engine with the correct config path.
 func InitFIXEngine(cfgPath string) error {
 	absPath, err := filepath.Abs(cfgPath)
 	if err != nil {
@@ -303,8 +297,7 @@ func InitFIXEngine(cfgPath string) error {
 	}
 
 	storeFactory := file.NewStoreFactory(settings)
-	logFactory := quickfix.NewNullLogFactory() // inactivation of FIX default meg
-	// logFactory := screen.NewLogFactory()
+	logFactory := quickfix.NewNullLogFactory()
 
 	app := App{}
 	initr, err := quickfix.NewInitiator(app, storeFactory, settings, logFactory)
@@ -315,7 +308,6 @@ func InitFIXEngine(cfgPath string) error {
 	return initiator.Start()
 }
 
-// StopFIXEngine stops the FIX initiator cleanly.
 func StopFIXEngine() {
 	if initiator != nil {
 		initiator.Stop()
