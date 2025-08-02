@@ -11,16 +11,17 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"runtime"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/joho/godotenv"
 )
 
 func main() {
-	// ✅ Load .env automatically
 	if err := godotenv.Load(); err == nil {
 		log.Println("[INFO] .env loaded successfully")
 	}
@@ -28,48 +29,50 @@ func main() {
 	runtime.GOMAXPROCS(runtime.NumCPU())
 	runtime.LockOSThread()
 
-	// 1) Load credentials
 	clientID := os.Getenv("DERIBIT_CLIENT_ID")
 	clientSecret := os.Getenv("DERIBIT_CLIENT_SECRET")
 	if clientID == "" || clientSecret == "" {
 		log.Fatal("[AUTH] missing DERIBIT_CLIENT_ID or DERIBIT_CLIENT_SECRET")
 	}
 
-	// 2) Issue JWT via REST (used only for auth validation)
 	_ = auth.FetchJWTToken(clientID, clientSecret)
 
-	// 3) Fetch BTC index price
+	// if err := data.InitSharedMemory(); err != nil {
+	// 	log.Fatal("[SHM] init failed:", err)
+	// }
+	log.Printf("[INFO] Shared memory base pointer: 0x%x", data.SharedMemoryPtr())
+
+	// // ✅ 자동 fork Index WS 프로세스
+	// path, _ := os.Executable()
+	// cmd := exec.Command(path, "--index-ws")
+	// cmd.Stdout = os.Stdout
+	// cmd.Stderr = os.Stderr
+	// if err := cmd.Start(); err != nil {
+	// 	log.Fatalf("[MAIN] Failed to fork index-ws process: %v", err)
+	// }
+	// log.Printf("[MAIN] Forked Index WS process (PID=%d)", cmd.Process.Pid)
+
 	btcPrice := fetchBTCPrice()
 	log.Printf("[INFO] BTC Price: %.2f", btcPrice)
+	data.WriteIndexPrice(btcPrice)
 
-	// 4) Fetch instruments & select ATM ±20 options
 	instruments := fetchInstruments()
 	nearestExpiry := findNearestExpiry(instruments)
 	options := filterOptions(instruments, nearestExpiry, btcPrice)
-	// ✅ data.MaxOptions 기준으로 잘라서 제한
 	if len(options) > data.MaxOptions {
 		options = options[:data.MaxOptions]
 	}
 
 	log.Printf("[INFO] Selected %d options from expiry %s", len(options), nearestExpiry)
-
-	// ✅ FIX 모듈에 옵션 리스트 전달
 	fix.SetOptionSymbols(options)
 
-	// ✅ 이벤트 채널 생성
 	updateCh := make(chan data.DepthEntry, 1024)
-
-	// ✅ OrderBook 초기화
 	data.InitOrderBooks(options, updateCh)
 
-	// ✅ BoxSpreadEngine 초기화
 	engine := strategy.NewBoxSpreadEngine(updateCh)
 	fix.InitBoxEngine(engine)
 
-	// ✅ 엔진 런타임 시작
 	go engine.Run()
-
-	// ✅ BoxSpread 시그널 수신
 	go func() {
 		for sig := range engine.Signals() {
 			log.Printf("[ORDER] BoxSpread triggered: %s Bid=%.4f / %s Ask=%.4f",
@@ -77,14 +80,16 @@ func main() {
 		}
 	}()
 
-	// 5) Initialize FIX engine
 	if err := fix.InitFIXEngine("config/quickfix.cfg"); err != nil {
-		log.Fatal("[FIX] Init failed:", err)
+		log.Printf("[FIX] Init failed:", err)
 	}
 	defer fix.StopFIXEngine()
 
-	// ✅ Keep main goroutine alive (FIX engine runs async)
-	select {}
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	<-sig
+
+	log.Println("[MAIN] Shutting down...")
 }
 
 // Fetch BTC index price via Deribit REST

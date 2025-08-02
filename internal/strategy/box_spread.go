@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"Options_Hedger/internal/data"
+	"log"
 	"math"
 	"strconv"
 	"strings"
@@ -52,51 +53,57 @@ func alreadySignaled(key string) bool {
 	return false
 }
 
-// ✅ Incremental 기반 박스 스프레드 탐지 benkim..밀리는거 없는지 탐지 필요
+// ✅ Incremental 기반 박스 스프레드 탐지
 func (e *BoxSpreadEngine) Run() {
 	for depth := range e.updates {
-		// start := time.Now()
-		// triggered := false // ✅ 탐지 여부 플래그
+		// ✅ 어떤 옵션(symbol)에 대한 업데이트인지 찾기
+		var symName string
+		for _, sym := range data.Symbols() {
+			quote := data.GetBestQuote(sym)
+			if quote.BidPrice == depth.BidPrice && quote.AskPrice == depth.AskPrice &&
+				quote.BidQty == depth.BidQty && quote.AskQty == depth.AskQty {
+				symName = sym
+				break
+			}
+		}
+		if symName == "" {
+			continue
+		}
 
-		parts := strings.Split(depth.Instrument, "-")
+		parts := strings.Split(symName, "-")
 		if len(parts) < 3 {
 			continue
 		}
 		strike, _ := strconv.ParseFloat(parts[2], 64)
 		expiry := parts[1]
-		isCall := strings.HasSuffix(depth.Instrument, "-C")
+		isCall := strings.HasSuffix(symName, "-C")
 
 		for _, sym := range data.Symbols() {
-			if sym == depth.Instrument || !strings.Contains(sym, expiry) {
+			if sym == symName || !strings.Contains(sym, expiry) {
 				continue
 			}
 			other := data.GetBestQuote(sym)
-			if other.Instrument == "" {
+			if other.BidPrice == 0 && other.AskPrice == 0 {
 				continue
 			}
-			otherStrike, _ := strconv.ParseFloat(strings.Split(other.Instrument, "-")[2], 64)
-			otherIsCall := strings.HasSuffix(other.Instrument, "-C")
+
+			otherParts := strings.Split(sym, "-")
+			if len(otherParts) < 3 {
+				continue
+			}
+			otherStrike, _ := strconv.ParseFloat(otherParts[2], 64)
+			otherIsCall := strings.HasSuffix(sym, "-C")
 
 			if isCall && !otherIsCall {
-				if e.checkBoxSpread(depth, other, strike, otherStrike, expiry) {
-					// triggered = true
-				}
+				e.checkBoxSpread(symName, sym, depth, other, strike, otherStrike, expiry)
 			} else if !isCall && otherIsCall {
-				if e.checkBoxSpread(other, depth, otherStrike, strike, expiry) {
-					// triggered = true
-				}
+				e.checkBoxSpread(sym, symName, other, depth, otherStrike, strike, expiry)
 			}
 		}
-
-		// benkim..소요시간체크
-		// if triggered {
-		// 	elapsed := time.Since(start).Microseconds()
-		// 	log.Printf("[PERF] %s incremental scan took %dµs", depth.Instrument, elapsed)
-		// }
 	}
 }
 
-func (e *BoxSpreadEngine) checkBoxSpread(call data.DepthEntry, put data.DepthEntry, callStrike, putStrike float64, expiry string) bool {
+func (e *BoxSpreadEngine) checkBoxSpread(callSym, putSym string, call data.DepthEntry, put data.DepthEntry, callStrike, putStrike float64, expiry string) bool {
 	low := math.Min(callStrike, putStrike)
 	high := math.Max(callStrike, putStrike)
 	if low == high {
@@ -108,18 +115,20 @@ func (e *BoxSpreadEngine) checkBoxSpread(call data.DepthEntry, put data.DepthEnt
 		return false
 	}
 
-	// ✅ USD 환산 (BTC 프리미엄 × Index Price)
-	usdCallAsk := call.AskPrice * data.GetIndexPrice()
-	usdCallBid := call.BidPrice * data.GetIndexPrice()
-	usdPutAsk := put.AskPrice * data.GetIndexPrice()
-	usdPutBid := put.BidPrice * data.GetIndexPrice()
+	idxPrice := data.GetIndexPrice()
+	usdCallAsk := call.AskPrice * idxPrice
+	usdCallBid := call.BidPrice * idxPrice
+	usdPutAsk := put.AskPrice * idxPrice
+	usdPutBid := put.BidPrice * idxPrice
+
+	log.Printf("Box Check: %.4f, %.4f, %.4f, %.4f|| %.4f ||", usdCallAsk, usdCallBid, usdPutAsk, usdPutBid, idxPrice) // benkim.. 복원필
+	return false
 
 	totalCost := (usdCallAsk + usdPutAsk) - (usdCallBid + usdPutBid)
-
 	if totalCost < (high - low) {
 		sig := Signal{
-			CallSym: call.Instrument,
-			PutSym:  put.Instrument,
+			CallSym: callSym,
+			PutSym:  putSym,
 			CallBid: usdCallAsk,
 			PutAsk:  usdPutAsk,
 		}

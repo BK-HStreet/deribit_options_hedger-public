@@ -7,7 +7,6 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"log"
-	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -29,6 +28,8 @@ type App struct{}
 var optionSymbols []string
 
 var engine *strategy.BoxSpreadEngine
+
+// var idxVal float64
 
 // // ✅ 외부에서 QuoteStore를 주입
 // func InitQuoteStore(s *data.QuoteStore) {
@@ -86,50 +87,70 @@ func (App) OnLogon(id quickfix.SessionID) {
 
 func (App) OnLogout(id quickfix.SessionID)                           {}
 func (App) ToApp(msg *quickfix.Message, id quickfix.SessionID) error { return nil }
+
 func (App) FromApp(msg *quickfix.Message, id quickfix.SessionID) quickfix.MessageRejectError {
-	log.Printf("[FIX-RAW-MSG] %s", msg.String())
-
-	// Tag 810 직접 접근
-	if val, err := msg.Body.GetString(810); err == nil {
-		log.Printf("[DEBUG-810-DIRECT] Tag810 raw='%s'", val)
-	} else {
-		log.Printf("[DEBUG-810-DIRECT] Tag810 not found: %v", err)
-	}
-
-	// UnderlyingPxField 접근
-	var uPx field.UnderlyingPxField
-	if err := msg.Body.Get(&uPx); err == nil {
-		idxVal, _ := uPx.Float64()
-		log.Printf("[DEBUG-810-UNDERLYINGPX] UnderlyingPx=%.2f", idxVal)
-	} else {
-		log.Printf("[DEBUG-810-UNDERLYINGPX] not found: %v", err)
-	}
-
 	msgType, _ := msg.Header.GetString(quickfix.Tag(35))
+	seqNum, _ := msg.Header.GetString(quickfix.Tag(34))
+
+	raw := msg.String()
+	log.Printf("[FIX-RAW] MsgType=%s Seq=%s Raw=%s", msgType, seqNum, raw)
+
+	var idxPrice float64
+
+	// ✅ Tag 810 (UnderlyingPx) 우선 확인
+	var idxPriceField quickfix.FIXFloat
+	if err := msg.Body.GetField(810, &idxPriceField); err == nil {
+		idxPrice = float64(idxPriceField)
+		data.SetIndexPrice(idxPrice)
+		log.Printf("[DEBUG-810] IndexPrice=%.2f MsgType=%s Seq=%s", idxPrice, msgType, seqNum)
+	}
+
+	// ✅ Market Data Snapshot(W)/Incremental(X)에서 Tag 44 (IndexPrice) 탐색
 	if msgType == "W" || msgType == "X" {
-		sym, bid, ask, bidQty, askQty, index, delBid, delAsk := fastParseFIX(msg)
-		log.Printf("[DEBUG-APPLY] %s Bid=%.4f Ask=%.4f Index=%.2f", sym, bid, ask, index)
+		group := quickfix.NewRepeatingGroup(268,
+			quickfix.GroupTemplate{
+				quickfix.GroupElement(269), // MDEntryType
+				quickfix.GroupElement(44),  // Price
+			})
+
+		if err := msg.Body.GetGroup(group); err == nil {
+			for i := 0; i < group.Len(); i++ {
+				entry := group.Get(i)
+
+				var mdType quickfix.FIXString
+				if err := entry.GetField(269, &mdType); err == nil && string(mdType) == "2" {
+					var px quickfix.FIXFloat
+					if err := entry.GetField(44, &px); err == nil && float64(px) > 0 {
+						idxPrice = float64(px)
+						data.SetIndexPrice(idxPrice)
+						log.Printf("[DEBUG-44] IndexPrice=%.2f Seq=%s", idxPrice, seqNum)
+					}
+				}
+			}
+		}
+	}
+
+	// ✅ 새로운 IndexPrice가 없으면 마지막 값 사용
+	if idxPrice == 0 {
+		idxPrice = data.GetIndexPrice()
+		log.Printf("[DEBUG-INDEX] No new index, using last=%.2f MsgType=%s Seq=%s", idxPrice, msgType, seqNum)
+	}
+
+	// ✅ Bid/Ask 업데이트
+	if msgType == "W" || msgType == "X" {
+		sym, bid, ask, bidQty, askQty, delBid, delAsk := fastParseFIX(msg)
+		log.Printf("[DEBUG-APPLY] Seq=%s Sym=%s Bid=%.4f Ask=%.4f Index=%.2f", seqNum, sym, bid, ask, idxPrice)
 
 		if sym != "" {
 			if bid > 0 || delBid {
-				data.ApplyUpdate(sym, true, bid, bidQty, index)
+				data.ApplyUpdate(sym, true, bid, bidQty, idxPrice)
 			}
 			if ask > 0 || delAsk {
-				data.ApplyUpdate(sym, false, ask, askQty, index)
+				data.ApplyUpdate(sym, false, ask, askQty, idxPrice)
 			}
-
-			depth := data.GetBestQuote(sym)
-			if engine != nil {
-				select {
-				case engine.Updates() <- depth:
-				default:
-				}
-			}
-
-			log.Printf("[FIX-DEPTH] %s | Bid=%.4f (Qty=%.2f) | Ask=%.4f (Qty=%.2f) | Index=%.2f",
-				sym, depth.BidPrice, depth.BidQty, depth.AskPrice, depth.AskQty, index)
 		}
 	}
+
 	return nil
 }
 
@@ -173,19 +194,10 @@ func (App) FromAdmin(msg *quickfix.Message, id quickfix.SessionID) quickfix.Mess
 	return nil
 }
 
-func fastParseFIX(msg *quickfix.Message) (string, float64, float64, float64, float64, float64, bool, bool) {
+func fastParseFIX(msg *quickfix.Message) (string, float64, float64, float64, float64, bool, bool) {
 	var sym string
 	var bestBid, bestAsk, bidQty, askQty float64
-	idxPrice := math.NaN()
 	var delBid, delAsk bool
-
-	// ✅ 메시지 Body에서 UnderlyingPx (810) 읽기
-	var uPx field.UnderlyingPxField
-	if err := msg.Body.Get(&uPx); err == nil {
-		if v, ok := uPx.Value().Float64(); ok && v > 0 {
-			idxPrice = v
-		}
-	}
 
 	msgType, _ := msg.Header.GetString(quickfix.Tag(35))
 	switch msgType {
@@ -267,7 +279,7 @@ func fastParseFIX(msg *quickfix.Message) (string, float64, float64, float64, flo
 		}
 	}
 
-	return sym, bestBid, bestAsk, bidQty, askQty, idxPrice, delBid, delAsk
+	return sym, bestBid, bestAsk, bidQty, askQty, delBid, delAsk
 }
 
 var initiator *quickfix.Initiator
