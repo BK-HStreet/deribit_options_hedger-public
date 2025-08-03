@@ -66,7 +66,7 @@ func (App) OnLogon(id quickfix.SessionID) {
 
 	// ✅ BTC-USD Index 심볼 추가 (IndexPrice 수신)
 	idxEntry := symGroup.Add()
-	idxEntry.Set(field.NewSymbol("BTC_USD_INDEX"))
+	idxEntry.Set(field.NewSymbol(".BTC"))
 	mdReq.SetGroup(symGroup)
 
 	// ✅ 요청 전송
