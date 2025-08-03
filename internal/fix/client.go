@@ -66,7 +66,7 @@ func (App) OnLogon(id quickfix.SessionID) {
 
 	// ✅ BTC-USD Index 심볼 추가 (IndexPrice 수신)
 	idxEntry := symGroup.Add()
-	idxEntry.Set(field.NewSymbol(".BTC"))
+	idxEntry.Set(field.NewSymbol("BTC-DERIBIT-INDEX")) // BTC-15AUG25-114000-P
 	mdReq.SetGroup(symGroup)
 
 	// ✅ 요청 전송
@@ -84,9 +84,6 @@ func (App) FromApp(msg *quickfix.Message, id quickfix.SessionID) quickfix.Messag
 	msgType, _ := msg.Header.GetString(quickfix.Tag(35))
 	seqNum, _ := msg.Header.GetString(quickfix.Tag(34))
 
-	// raw := msg.String()
-	// log.Printf("[FIX-RAW] MsgType=%s Seq=%s Raw=%s", msgType, seqNum, raw)
-
 	var idxPrice float64
 
 	// ✅ Tag 810 (UnderlyingPx) 먼저 확인
@@ -94,33 +91,40 @@ func (App) FromApp(msg *quickfix.Message, id quickfix.SessionID) quickfix.Messag
 	if err := msg.Body.GetField(810, &idxField); err == nil {
 		idxPrice = float64(idxField)
 		data.SetIndexPrice(idxPrice)
-		// log.Printf("[DEBUG-810] IndexPrice=%.2f MsgType=%s Seq=%s", idxPrice, msgType, seqNum)
-	} else {
-		raw := msg.String()
-		log.Printf("[FIX-RAW non] MsgType=%s Seq=%s Raw=%s", msgType, seqNum, raw)
-		log.Printf("[DEBUG-810 non] IndexPrice=%.2f MsgType=%s Seq=%s", idxPrice, msgType, seqNum)
+		log.Printf("[INDEX-810] IndexPrice=%.2f MsgType=%s Seq=%s", idxPrice, msgType, seqNum)
 	}
 
-	// ✅ Snapshot/Incremental에서 Tag 44 (IndexPrice) 추출
+	// ✅ Snapshot/Incremental에서 269=3 (Index Value) 처리
 	if msgType == "W" || msgType == "X" {
 		group := quickfix.NewRepeatingGroup(268,
 			quickfix.GroupTemplate{
 				quickfix.GroupElement(269), // MDEntryType
-				quickfix.GroupElement(44),  // Price (Index)
+				quickfix.GroupElement(270), // MDEntryPx (Price)
 			})
 
 		if err := msg.Body.GetGroup(group); err == nil {
+			foundIndex := false
 			for i := 0; i < group.Len(); i++ {
 				entry := group.Get(i)
 				var mdType quickfix.FIXString
-				if err := entry.GetField(269, &mdType); err == nil && string(mdType) == "2" {
-					var px quickfix.FIXFloat
-					if err := entry.GetField(44, &px); err == nil && float64(px) > 0 {
-						idxPrice = float64(px)
-						data.SetIndexPrice(idxPrice)
-						log.Printf("[DEBUG-44] IndexPrice=%.2f Seq=%s", idxPrice, seqNum)
+				if err := entry.GetField(269, &mdType); err == nil {
+					if string(mdType) == "3" {
+						// ✅ 269=3 은 Index Value, Tag 270에서 가격 추출
+						var px quickfix.FIXFloat
+						if err := entry.GetField(270, &px); err == nil && float64(px) > 0 {
+							idxPrice = float64(px)
+							data.SetIndexPrice(idxPrice)
+							foundIndex = true
+							log.Printf("[INDEX-269=3] IndexPrice=%.2f MsgType=%s Seq=%s", idxPrice, msgType, seqNum)
+						}
 					}
 				}
+			}
+
+			// ✅ Index가 아닌 메시지는 RAW 출력
+			if !foundIndex && (msgType == "W" || msgType == "X") {
+				raw := msg.String()
+				log.Printf("[NON-INDEX-RAW] MsgType=%s Seq=%s Raw=%s", msgType, seqNum, raw)
 			}
 		}
 	}
@@ -128,22 +132,21 @@ func (App) FromApp(msg *quickfix.Message, id quickfix.SessionID) quickfix.Messag
 	// ✅ 새로운 IndexPrice가 없으면 마지막 값 유지
 	if idxPrice == 0 {
 		idxPrice = data.GetIndexPrice()
-		log.Printf("[DEBUG-INDEX] No new index, using last=%.2f MsgType=%s Seq=%s", idxPrice, msgType, seqNum)
 	}
 
-	// ✅ Bid/Ask 처리
+	// ✅ Bid/Ask 처리 (Index 메시지가 아닌 경우에만)
 	if msgType == "W" || msgType == "X" {
 		sym, bid, ask, bidQty, askQty, delBid, delAsk := fastParseFIX(msg)
 
-		// BTC-USD Index 메시지는 시세 업데이트 제외
-		if sym == "BTC-USD" {
-			log.Printf("[DEBUG-INDEX-ONLY] Seq=%s Index=%.2f", seqNum, idxPrice)
+		// BTC-DERIBIT-INDEX 메시지는 시세 업데이트 제외
+		if sym == "BTC-DERIBIT-INDEX" || sym == "BTC-USD" {
+			log.Printf("[INDEX-SKIP] Seq=%s Sym=%s Index=%.2f", seqNum, sym, idxPrice)
 			return nil
 		}
 
-		log.Printf("[DEBUG-APPLY] Seq=%s Sym=%s Bid=%.4f Ask=%.4f Index=%.2f", seqNum, sym, bid, ask, idxPrice)
-
 		if sym != "" {
+			log.Printf("[OPTION-UPDATE] Seq=%s Sym=%s Bid=%.4f Ask=%.4f Index=%.2f", seqNum, sym, bid, ask, idxPrice)
+
 			if bid > 0 || delBid {
 				data.ApplyUpdate(sym, true, bid, bidQty, idxPrice)
 			}
