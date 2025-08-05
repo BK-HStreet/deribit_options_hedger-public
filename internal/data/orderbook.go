@@ -15,7 +15,6 @@ func InitOrderBooks(syms []string, ch chan DepthEntry) {
 	}
 }
 
-// ✅ FIX/WS 업데이트 적용
 func ApplyUpdate(symbol string, isBid bool, price, qty, idxPrice float64) {
 	idx, ok := symbolIndex[symbol]
 	if !ok || idx >= MaxOptions {
