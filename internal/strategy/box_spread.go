@@ -2,7 +2,6 @@ package strategy
 
 import (
 	"Options_Hedger/internal/data"
-	"log"
 	"math"
 	"strconv"
 	"strings"
@@ -121,8 +120,8 @@ func (e *BoxSpreadEngine) checkBoxSpread(callSym, putSym string, call data.Depth
 	usdPutAsk := put.AskPrice * idxPrice
 	usdPutBid := put.BidPrice * idxPrice
 
-	log.Printf("Box Check: %.4f, %.4f, %.4f, %.4f|| %.4f ||", usdCallAsk, usdCallBid, usdPutAsk, usdPutBid, idxPrice) // benkim.. 복원필
-	return false
+	// log.Printf("Box Check: %.4f, %.4f, %.4f, %.4f|| %.4f ||", usdCallAsk, usdCallBid, usdPutAsk, usdPutBid, idxPrice)
+	return false // benkim.. 복원필
 
 	totalCost := (usdCallAsk + usdPutAsk) - (usdCallBid + usdPutBid)
 	if totalCost < (high - low) {

@@ -11,14 +11,11 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/quickfixgo/enum"
 	"github.com/quickfixgo/field"
-	"github.com/quickfixgo/fix44/marketdataincrementalrefresh"
 	"github.com/quickfixgo/fix44/marketdatarequest"
-	"github.com/quickfixgo/fix44/marketdatasnapshotfullrefresh"
 	"github.com/quickfixgo/quickfix"
 	"github.com/quickfixgo/quickfix/store/file"
 )
@@ -120,12 +117,12 @@ type PriceLevel struct {
 	Qty   float64
 }
 
-func (App) FromApp(msg *quickfix.Message, id quickfix.SessionID) quickfix.MessageRejectError {
+func (app *App) FromApp(msg *quickfix.Message, id quickfix.SessionID) quickfix.MessageRejectError {
 	msgType, _ := msg.Header.GetString(quickfix.Tag(35))
 	seqNum, _ := msg.Header.GetString(quickfix.Tag(34))
 
-	raw := msg.String()
-	log.Printf("[FIX-RAW] MsgType=%s Seq=%s Raw=%s", msgType, seqNum, raw)
+	// raw := msg.String()
+	// log.Printf("[FIX-RAW] MsgType=%s Seq=%s Raw=%s", msgType, seqNum, raw)
 
 	var idxPrice float64
 	foundIndex := false
@@ -184,10 +181,10 @@ func (App) FromApp(msg *quickfix.Message, id quickfix.SessionID) quickfix.Messag
 	// ✅ IndexPrice가 여전히 0이면 마지막 값 사용
 	if !foundIndex {
 		idxPrice = data.GetIndexPrice()
-		log.Printf("[DEBUG-INDEX] No new index, using last=%.2f MsgType=%s Seq=%s", idxPrice, msgType, seqNum)
+		// log.Printf("[DEBUG-INDEX] No new index, using last=%.2f MsgType=%s Seq=%s", idxPrice, msgType, seqNum)
 	}
 
-	// ✅ Bid/Ask 처리 (개선된 버전)
+	// ✅ Bid/Ask 처리 (수정된 버전)
 	if msgType == "W" || msgType == "X" {
 		sym, bid, ask, bidQty, askQty, delBid, delAsk := fastParseFIX(msg)
 
@@ -197,7 +194,7 @@ func (App) FromApp(msg *quickfix.Message, id quickfix.SessionID) quickfix.Messag
 			return nil
 		}
 
-		log.Printf("[DEBUG-APPLY] Seq=%s Sym=%s Bid=%.4f Ask=%.4f Index=%.2f", seqNum, sym, bid, ask, idxPrice)
+		log.Printf("[DEBUG-APPLY] Seq=%s Sym=%s Bid=%.4f bidQty=%.4f Ask=%.4f askQty=%.4f Index=%.2f", seqNum, sym, bid, bidQty, ask, askQty, idxPrice)
 
 		if sym != "" {
 			if bid > 0 || delBid {
@@ -212,7 +209,6 @@ func (App) FromApp(msg *quickfix.Message, id quickfix.SessionID) quickfix.Messag
 	return nil
 }
 
-// 개선된 FIX 메시지 파싱 함수
 func fastParseFIX(msg *quickfix.Message) (string, float64, float64, float64, float64, bool, bool) {
 	var sym string
 	var bestBid, bestAsk, bidQty, askQty float64
@@ -220,220 +216,159 @@ func fastParseFIX(msg *quickfix.Message) (string, float64, float64, float64, flo
 
 	msgType, _ := msg.Header.GetString(quickfix.Tag(35))
 
-	switch msgType {
-	case "W": // Market Data Snapshot
-		snap := marketdatasnapshotfullrefresh.FromMessage(msg)
-		symField := new(field.SymbolField)
-		if err := snap.Get(symField); err == nil {
-			sym = symField.Value()
+	// Extract Symbol (Tag 55) from message level
+	var symField quickfix.FIXString
+	if err := msg.Body.GetField(55, &symField); err == nil {
+		sym = symField.String()
+	}
+
+	// Define a more comprehensive group template
+	group := quickfix.NewRepeatingGroup(268,
+		quickfix.GroupTemplate{
+			quickfix.GroupElement(279), // MDUpdateAction
+			quickfix.GroupElement(269), // MDEntryType
+			quickfix.GroupElement(270), // Price
+			quickfix.GroupElement(271), // Size
+			quickfix.GroupElement(272), // MDEntryTime (optional)
+			// Add other possible tags if needed
+		})
+
+	if err := msg.Body.GetGroup(group); err != nil {
+		log.Printf("[ERROR] Failed to parse group 268: %v", err)
+		return sym, bestBid, bestAsk, bidQty, askQty, delBid, delAsk
+	}
+
+	var bids, asks []PriceLevel
+	var bidUpdates, askUpdates []PriceLevel
+
+	for i := 0; i < group.Len(); i++ {
+		entry := group.Get(i)
+
+		var mdType quickfix.FIXString
+		var price quickfix.FIXFloat
+		var size quickfix.FIXFloat
+		var action quickfix.FIXString
+
+		// Extract fields with error checking
+		if err := entry.GetField(269, &mdType); err != nil {
+			log.Printf("[ERROR] Missing MDEntryType (269) in group %d", i)
+			continue
+		}
+		if err := entry.GetField(270, &price); err != nil {
+			log.Printf("[ERROR] Missing Price (270) in group %d", i)
+			continue
+		}
+		if err := entry.GetField(271, &size); err != nil {
+			log.Printf("[ERROR] Missing Size (271) in group %d", i)
+			continue
+		}
+		entry.GetField(279, &action) // Optional, may not be present in Snapshot
+
+		p := float64(price)
+		q := float64(size)
+
+		// Skip INDEX type (3)
+		if mdType.String() == "3" {
+			continue
 		}
 
-		group, err := snap.GetNoMDEntries()
-		if err != nil {
-			return sym, 0, 0, 0, 0, false, false
-		}
+		// log.Printf("[DEBUG-ENTRY] Seq=%s Entry=%d Type=%s Price=%.4f Size=%.2f Action=%s",
+		// 	"", i, mdType.String(), p, q, action.String())
 
-		// ✅ 모든 bid/ask 레벨을 수집
-		var bids, asks []PriceLevel
-
-		for i := 0; i < group.Len(); i++ {
-			entry := group.Get(i)
-			etype := new(field.MDEntryTypeField)
-			price := new(field.MDEntryPxField)
-			qty := new(field.MDEntrySizeField)
-
-			if err := entry.Get(etype); err != nil {
-				continue
-			}
-			if err := entry.Get(price); err != nil {
-				continue
-			}
-			if err := entry.Get(qty); err != nil {
-				continue
-			}
-
-			p, ok := price.Value().Float64()
-			if !ok || p <= 0 {
-				continue
-			}
-			q, _ := qty.Value().Float64()
-
-			// ✅ INDEX 타입(3)은 스킵
-			if etype.Value() == enum.MDEntryType_INDEX_VALUE {
-				continue
-			}
-
-			switch etype.Value() {
-			case enum.MDEntryType_BID:
-				if q > 0 { // 수량이 0인 레벨은 제외
+		switch msgType {
+		case "W": // Snapshot
+			if p > 0 && q > 0 {
+				switch mdType.String() {
+				case "0": // BID
 					bids = append(bids, PriceLevel{Price: p, Qty: q})
-				}
-			case enum.MDEntryType_OFFER:
-				if q > 0 { // 수량이 0인 레벨은 제외
+				case "1": // OFFER
 					asks = append(asks, PriceLevel{Price: p, Qty: q})
 				}
 			}
-		}
 
-		// ✅ Best Bid = 가장 높은 매수가
-		if len(bids) > 0 {
-			bestBidLevel := findBestBid(bids)
-			bestBid = bestBidLevel.Price
-			bidQty = bestBidLevel.Qty
-			log.Printf("[DEBUG-SNAPSHOT] Sym=%s BestBid=%.4f (from %d levels)", sym, bestBid, len(bids))
-		}
-
-		// ✅ Best Ask = 가장 낮은 매도가
-		if len(asks) > 0 {
-			bestAskLevel := findBestAsk(asks)
-			bestAsk = bestAskLevel.Price
-			askQty = bestAskLevel.Qty
-			log.Printf("[DEBUG-SNAPSHOT] Sym=%s BestAsk=%.4f (from %d levels)", sym, bestAsk, len(asks))
-		}
-
-	case "X": // Market Data Incremental Refresh
-		incr := marketdataincrementalrefresh.FromMessage(msg)
-
-		// ✅ Symbol 추출 개선
-		symField := new(field.SymbolField)
-		if err := incr.Get(symField); err == nil {
-			sym = symField.Value()
-		}
-
-		group, err := incr.GetNoMDEntries()
-		if err != nil {
-			return sym, 0, 0, 0, 0, false, false
-		}
-
-		// ✅ Incremental에서는 업데이트된 레벨만 처리
-		for i := 0; i < group.Len(); i++ {
-			entry := group.Get(i)
-			etype := new(field.MDEntryTypeField)
-			price := new(field.MDEntryPxField)
-			qty := new(field.MDEntrySizeField)
-			action := new(field.MDUpdateActionField)
-
-			if err := entry.Get(etype); err != nil {
-				continue
-			}
-
-			// ✅ INDEX 타입(3)은 스킵
-			if etype.Value() == enum.MDEntryType_INDEX_VALUE {
-				continue
-			}
-
-			if err := entry.Get(price); err != nil {
-				continue
-			}
-			if err := entry.Get(qty); err != nil {
-				continue
-			}
-			if err := entry.Get(action); err != nil {
-				continue
-			}
-
-			// ✅ Symbol이 그룹에 없으면 메시지 레벨에서 가져오기
-			if sym == "" {
-				var entrySym quickfix.FIXString
-				if err := entry.GetField(55, &entrySym); err == nil {
-					sym = entrySym.String()
-				}
-			}
-
-			p, ok := price.Value().Float64()
-			if !ok {
-				continue
-			}
-			q, _ := qty.Value().Float64()
-
-			// ✅ DELETE 액션 처리
-			if action.Value() == enum.MDUpdateAction_DELETE {
+		case "X": // Incremental
+			if action.String() == "2" { // DELETE
 				q = 0
-				if etype.Value() == enum.MDEntryType_BID {
+				switch mdType.String() {
+				case "0": // BID
 					delBid = true
-				} else if etype.Value() == enum.MDEntryType_OFFER {
+				case "1": // OFFER
 					delAsk = true
 				}
 			}
 
-			// ✅ 업데이트된 레벨 반환
-			switch etype.Value() {
-			case enum.MDEntryType_BID:
-				bestBid = p
-				bidQty = q
-				log.Printf("[DEBUG-INCREMENTAL] Sym=%s BidUpdate Price=%.4f Qty=%.2f Action=%v", sym, p, q, action.Value())
-			case enum.MDEntryType_OFFER:
-				bestAsk = p
-				askQty = q
-				log.Printf("[DEBUG-INCREMENTAL] Sym=%s AskUpdate Price=%.4f Qty=%.2f Action=%v", sym, p, q, action.Value())
+			switch mdType.String() {
+			case "0": // BID
+				bidUpdates = append(bidUpdates, PriceLevel{Price: p, Qty: q})
+			case "1": // OFFER
+				askUpdates = append(askUpdates, PriceLevel{Price: p, Qty: q})
 			}
+		}
+	}
+
+	// Process Snapshot
+	if msgType == "W" {
+		if len(bids) > 0 {
+			bestBidLevel := findBestBid(bids)
+			bestBid = bestBidLevel.Price
+			bidQty = bestBidLevel.Qty
+			log.Printf("[DEBUG-SNAPSHOT] Sym=%s BestBid=%.4f Qty=%.2f (from %d levels)",
+				sym, bestBid, bidQty, len(bids))
+		}
+		if len(asks) > 0 {
+			bestAskLevel := findBestAsk(asks)
+			bestAsk = bestAskLevel.Price
+			askQty = bestAskLevel.Qty
+			log.Printf("[DEBUG-SNAPSHOT] Sym=%s BestAsk=%.4f Qty=%.2f (from %d levels)",
+				sym, bestAsk, askQty, len(asks))
+		}
+	}
+
+	// Process Incremental
+	if msgType == "X" {
+		if len(bidUpdates) > 0 {
+			bestBidLevel := findBestBid(bidUpdates)
+			bestBid = bestBidLevel.Price
+			bidQty = bestBidLevel.Qty
+			log.Printf("[DEBUG-INCREMENTAL] Sym=%s BidUpdate=%.4f Qty=%.2f",
+				sym, bestBid, bidQty)
+		}
+		if len(askUpdates) > 0 {
+			bestAskLevel := findBestAsk(askUpdates)
+			bestAsk = bestAskLevel.Price
+			askQty = bestAskLevel.Qty
+			log.Printf("[DEBUG-INCREMENTAL] Sym=%s AskUpdate=%.4f Qty=%.2f",
+				sym, bestAsk, askQty)
 		}
 	}
 
 	return sym, bestBid, bestAsk, bidQty, askQty, delBid, delAsk
 }
 
-// 가장 높은 매수가 찾기 (개선된 버전)
+// ✅ Best Bid 찾기 (가장 높은 매수가)
 func findBestBid(bids []PriceLevel) PriceLevel {
 	if len(bids) == 0 {
 		return PriceLevel{}
 	}
 
-	// 가격 기준 내림차순 정렬 (높은 가격이 먼저)
 	sort.Slice(bids, func(i, j int) bool {
-		return bids[i].Price > bids[j].Price
+		return bids[i].Price > bids[j].Price // 내림차순
 	})
 
-	return bids[0] // 가장 높은 가격
+	return bids[0]
 }
 
-// 가장 낮은 매도가 찾기 (개선된 버전)
+// ✅ Best Ask 찾기 (가장 낮은 매도가)
 func findBestAsk(asks []PriceLevel) PriceLevel {
 	if len(asks) == 0 {
 		return PriceLevel{}
 	}
 
-	// 가격 기준 오름차순 정렬 (낮은 가격이 먼저)
 	sort.Slice(asks, func(i, j int) bool {
-		return asks[i].Price < asks[j].Price
+		return asks[i].Price < asks[j].Price // 오름차순
 	})
 
-	return asks[0] // 가장 낮은 가격
-}
-
-// 인덱스 전용 심볼인지 확인
-func isIndexSymbol(symbol string) bool {
-	indexSymbols := []string{
-		"BTC-DERIBIT-INDEX",
-		"BTC-USD",
-		"ETH-DERIBIT-INDEX",
-		"ETH-USD",
-		"BTC_USD", // 언더스코어 버전도 체크
-		"ETH_USD",
-	}
-
-	for _, indexSym := range indexSymbols {
-		if symbol == indexSym {
-			return true
-		}
-	}
-	return false
-}
-
-// 유효한 옵션 심볼인지 확인
-func isValidOptionSymbol(symbol string) bool {
-	// 옵션 심볼 패턴: BTC-DDMMMYY-STRIKE-C/P (예: BTC-29MAR24-50000-C)
-	if len(symbol) < 10 {
-		return false
-	}
-
-	// BTC 또는 ETH로 시작하고 -C 또는 -P로 끝나는지 확인
-	if (strings.HasPrefix(symbol, "BTC-") || strings.HasPrefix(symbol, "ETH-")) &&
-		(strings.HasSuffix(symbol, "-C") || strings.HasSuffix(symbol, "-P")) {
-		return true
-	}
-
-	return false
+	return asks[0]
 }
 
 var initiator *quickfix.Initiator
