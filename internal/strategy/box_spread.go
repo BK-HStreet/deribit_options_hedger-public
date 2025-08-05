@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"Options_Hedger/internal/data"
+	"log"
 	"math"
 	"strconv"
 	"strings"
@@ -120,7 +121,9 @@ func (e *BoxSpreadEngine) checkBoxSpread(callSym, putSym string, call data.Depth
 	usdPutAsk := put.AskPrice * idxPrice
 	usdPutBid := put.BidPrice * idxPrice
 
-	// log.Printf("Box Check: %.4f, %.4f, %.4f, %.4f|| %.4f ||", usdCallAsk, usdCallBid, usdPutAsk, usdPutBid, idxPrice)
+	log.Printf("Box Check: callSym=%s, putSym=%s, callStrike=%.4f, putStrike=%4.f, call.AskPrice=%.4f, usdCallAsk=%.4f, call.BidPrice=%.4f, usdCallBid=%.4f, put.AskPrice=%.4f, usdPutAsk=%.4f, put.BidPrice=%.4f, usdPutBid=%.4f, expiry=%s || %.4f ||",
+		callSym, putSym, callStrike, putStrike, call.AskPrice, usdCallAsk, call.BidPrice, usdCallBid, put.AskPrice, usdPutAsk, put.BidPrice, usdPutBid, expiry, idxPrice)
+
 	return false // benkim.. 복원필
 
 	totalCost := (usdCallAsk + usdPutAsk) - (usdCallBid + usdPutBid)
