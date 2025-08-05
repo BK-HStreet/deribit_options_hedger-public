@@ -132,7 +132,7 @@ func (app *App) FromApp(msg *quickfix.Message, id quickfix.SessionID) quickfix.M
 	if err := msg.Body.GetField(810, &idxField); err == nil {
 		idxPrice = float64(idxField)
 		data.SetIndexPrice(idxPrice)
-		log.Printf("[INDEX-810] IndexPrice=%.2f MsgType=%s Seq=%s", idxPrice, msgType, seqNum)
+		// log.Printf("[INDEX-810] IndexPrice=%.2f MsgType=%s Seq=%s", idxPrice, msgType, seqNum)
 		foundIndex = true
 	}
 
@@ -171,7 +171,7 @@ func (app *App) FromApp(msg *quickfix.Message, id quickfix.SessionID) quickfix.M
 					idxPrice = float64(px)
 					data.SetIndexPrice(idxPrice)
 					foundIndex = true
-					log.Printf("[INDEX-269=3] IndexPrice=%.2f Sym=%s Seq=%s", idxPrice, sym.String(), seqNum)
+					// log.Printf("[INDEX-269=3] IndexPrice=%.2f Sym=%s Seq=%s", idxPrice, sym.String(), seqNum)
 					break
 				}
 			}
@@ -190,11 +190,13 @@ func (app *App) FromApp(msg *quickfix.Message, id quickfix.SessionID) quickfix.M
 
 		// Index 심볼은 무시
 		if sym == "BTC-DERIBIT-INDEX" || sym == "BTC-USD" {
-			log.Printf("[DEBUG-INDEX-ONLY] Seq=%s Index=%.2f", seqNum, idxPrice)
+			// log.Printf("[DEBUG-INDEX-ONLY] Seq=%s Index=%.2f", seqNum, idxPrice)
 			return nil
 		}
 
-		log.Printf("[DEBUG-APPLY] Seq=%s Sym=%s Bid=%.4f bidQty=%.4f Ask=%.4f askQty=%.4f Index=%.2f", seqNum, sym, bid, bidQty, ask, askQty, idxPrice)
+		if sym == "BTC-15AUG25-117000-C" {
+			log.Printf("[DEBUG-APPLY] Seq=%s Sym=%s Bid=%.4f bidQty=%.4f Ask=%.4f askQty=%.4f Index=%.2f", seqNum, sym, bid, bidQty, ask, askQty, idxPrice)
+		}
 
 		if sym != "" {
 			if bid > 0 || delBid {
@@ -251,15 +253,15 @@ func fastParseFIX(msg *quickfix.Message) (string, float64, float64, float64, flo
 
 		// Extract fields with error checking
 		if err := entry.GetField(269, &mdType); err != nil {
-			log.Printf("[ERROR] Missing MDEntryType (269) in group %d", i)
+			// log.Printf("[ERROR] Missing MDEntryType (269) in group %d", i)
 			continue
 		}
 		if err := entry.GetField(270, &price); err != nil {
-			log.Printf("[ERROR] Missing Price (270) in group %d", i)
+			// log.Printf("[ERROR] Missing Price (270) in group %d", i)
 			continue
 		}
 		if err := entry.GetField(271, &size); err != nil {
-			log.Printf("[ERROR] Missing Size (271) in group %d", i)
+			// log.Printf("[ERROR] Missing Size (271) in group %d", i)
 			continue
 		}
 		entry.GetField(279, &action) // Optional, may not be present in Snapshot
@@ -330,15 +332,15 @@ func fastParseFIX(msg *quickfix.Message) (string, float64, float64, float64, flo
 			bestBidLevel := findBestBid(bidUpdates)
 			bestBid = bestBidLevel.Price
 			bidQty = bestBidLevel.Qty
-			log.Printf("[DEBUG-INCREMENTAL] Sym=%s BidUpdate=%.4f Qty=%.2f",
-				sym, bestBid, bidQty)
+			// log.Printf("[DEBUG-INCREMENTAL] Sym=%s BidUpdate=%.4f Qty=%.2f",
+			// 	sym, bestBid, bidQty)
 		}
 		if len(askUpdates) > 0 {
 			bestAskLevel := findBestAsk(askUpdates)
 			bestAsk = bestAskLevel.Price
 			askQty = bestAskLevel.Qty
-			log.Printf("[DEBUG-INCREMENTAL] Sym=%s AskUpdate=%.4f Qty=%.2f",
-				sym, bestAsk, askQty)
+			// log.Printf("[DEBUG-INCREMENTAL] Sym=%s AskUpdate=%.4f Qty=%.2f",
+			// 	sym, bestAsk, askQty)
 		}
 	}
 
