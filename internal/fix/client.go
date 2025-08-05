@@ -119,7 +119,7 @@ type PriceLevel struct {
 
 func (app *App) FromApp(msg *quickfix.Message, id quickfix.SessionID) quickfix.MessageRejectError {
 	msgType, _ := msg.Header.GetString(quickfix.Tag(35))
-	seqNum, _ := msg.Header.GetString(quickfix.Tag(34))
+	// seqNum, _ := msg.Header.GetString(quickfix.Tag(34))
 
 	// raw := msg.String()
 	// log.Printf("[FIX-RAW] MsgType=%s Seq=%s Raw=%s", msgType, seqNum, raw)
@@ -194,9 +194,9 @@ func (app *App) FromApp(msg *quickfix.Message, id quickfix.SessionID) quickfix.M
 			return nil
 		}
 
-		if sym == "BTC-15AUG25-117000-C" {
-			log.Printf("[DEBUG-APPLY] Seq=%s Sym=%s Bid=%.4f bidQty=%.4f Ask=%.4f askQty=%.4f Index=%.2f", seqNum, sym, bid, bidQty, ask, askQty, idxPrice)
-		}
+		// if sym == "BTC-15AUG25-117000-C" {
+		// 	log.Printf("[DEBUG-APPLY] Seq=%s Sym=%s Bid=%.4f bidQty=%.4f Ask=%.4f askQty=%.4f Index=%.2f", seqNum, sym, bid, bidQty, ask, askQty, idxPrice)
+		// }
 
 		if sym != "" {
 			if bid > 0 || delBid {
