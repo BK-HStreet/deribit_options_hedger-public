@@ -194,9 +194,9 @@ func (app *App) FromApp(msg *quickfix.Message, id quickfix.SessionID) quickfix.M
 			return nil
 		}
 
-		// if sym == "BTC-15AUG25-117000-C" {
-		// 	log.Printf("[DEBUG-APPLY] Seq=%s Sym=%s Bid=%.4f bidQty=%.4f Ask=%.4f askQty=%.4f Index=%.2f", seqNum, sym, bid, bidQty, ask, askQty, idxPrice)
-		// }
+		// log.Printf("[DEBUG-APPLY] Seq=%s Sym=%s Bid=%.4f bidQty=%.4f Ask=%.4f askQty=%.4f Index=%.2f", seqNum, sym, bid, bidQty, ask, askQty, idxPrice)
+
+		log.Printf("[DEBUG-APPLY] Index=%.2f", idxPrice)
 
 		if sym != "" {
 			if bid > 0 || delBid {
