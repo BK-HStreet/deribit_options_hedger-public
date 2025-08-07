@@ -9,7 +9,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -289,58 +288,107 @@ func fastParseHFT(msg *quickfix.Message, msgType string) (string, float64, float
 		return sym, bestBid, bestAsk, bidQty, askQty, delBid, delAsk
 	}
 
-	// ✅ HFT 최적화: 스택 배열 사용 (힙 할당 없음)
-	var bids [8]PriceLevel // 최대 8개 레벨
-	var asks [8]PriceLevel
-	var bidCount, askCount int
+	switch msgType {
+	case "W": // Snapshot - 모든 레벨 수집 후 베스트 찾기
+		// ✅ 스택 배열로 모든 bid/ask 레벨 수집
+		var bids [16]PriceLevel // 최대 16개 레벨 (충분히 큰 버퍼)
+		var asks [16]PriceLevel
+		var bidCount, askCount int
 
-	var bidUpdates [2]PriceLevel // Incremental은 보통 1-2개
-	var askUpdates [2]PriceLevel
-	var bidUpdateCount, askUpdateCount int
+		for i := 0; i < group.Len() && i < 32; i++ { // 최대 32개 엔트리
+			entry := group.Get(i)
 
-	for i := 0; i < group.Len(); i++ {
-		entry := group.Get(i)
+			var mdType quickfix.FIXString
+			var price quickfix.FIXFloat
+			var size quickfix.FIXFloat
 
-		var mdType quickfix.FIXString
-		var price quickfix.FIXFloat
-		var size quickfix.FIXFloat
-		var action quickfix.FIXString
+			if entry.GetField(269, &mdType) != nil ||
+				entry.GetField(270, &price) != nil ||
+				entry.GetField(271, &size) != nil {
+				continue
+			}
 
-		// ✅ 필수 필드만 체크
-		if entry.GetField(269, &mdType) != nil ||
-			entry.GetField(270, &price) != nil ||
-			entry.GetField(271, &size) != nil {
-			continue
-		}
+			// INDEX 타입 스킵
+			if mdType.String() == "3" {
+				continue
+			}
 
-		// ✅ INDEX 타입 스킵 (빠른 체크)
-		if mdType.String() == "3" {
-			continue
-		}
+			p := float64(price)
+			q := float64(size)
 
-		p := float64(price)
-		q := float64(size)
-
-		switch msgType {
-		case "W": // Snapshot
+			// ✅ 유효한 가격과 수량만 수집
 			if p > 0 && q > 0 {
 				switch mdType.String() {
 				case "0": // BID
-					if bidCount < 8 {
+					if bidCount < 16 {
 						bids[bidCount] = PriceLevel{Price: p, Qty: q}
 						bidCount++
 					}
 				case "1": // OFFER
-					if askCount < 8 {
+					if askCount < 16 {
 						asks[askCount] = PriceLevel{Price: p, Qty: q}
 						askCount++
 					}
 				}
 			}
+		}
 
-		case "X": // Incremental
+		// ✅ 베스트 Bid 찾기 (가장 높은 가격)
+		if bidCount > 0 {
+			bestIdx := 0
+			for i := 1; i < bidCount; i++ {
+				if bids[i].Price > bids[bestIdx].Price {
+					bestIdx = i
+				}
+			}
+			bestBid = bids[bestIdx].Price
+			bidQty = bids[bestIdx].Qty
+		}
+
+		// ✅ 베스트 Ask 찾기 (가장 낮은 가격)
+		if askCount > 0 {
+			bestIdx := 0
+			for i := 1; i < askCount; i++ {
+				if asks[i].Price < asks[bestIdx].Price {
+					bestIdx = i
+				}
+			}
+			bestAsk = asks[bestIdx].Price
+			askQty = asks[bestIdx].Qty
+		}
+
+		// 디버깅용 로그
+		if strings.Contains(sym, "117000-C") {
+			log.Printf("[SNAPSHOT-DEBUG] Sym=%s BidLevels=%d AskLevels=%d BestBid=%.4f(%.1f) BestAsk=%.4f(%.1f)",
+				sym, bidCount, askCount, bestBid, bidQty, bestAsk, askQty)
+		}
+
+	case "X": // Incremental - 직접 업데이트 처리
+		for i := 0; i < group.Len() && i < 8; i++ { // Incremental은 보통 적음
+			entry := group.Get(i)
+
+			var mdType quickfix.FIXString
+			var price quickfix.FIXFloat
+			var size quickfix.FIXFloat
+			var action quickfix.FIXString
+
+			if entry.GetField(269, &mdType) != nil ||
+				entry.GetField(270, &price) != nil ||
+				entry.GetField(271, &size) != nil {
+				continue
+			}
+
+			// INDEX 타입 스킵
+			if mdType.String() == "3" {
+				continue
+			}
+
 			entry.GetField(279, &action) // 선택적
 
+			p := float64(price)
+			q := float64(size)
+
+			// ✅ DELETE 액션 처리
 			if action.String() == "2" { // DELETE
 				q = 0
 				switch mdType.String() {
@@ -351,106 +399,29 @@ func fastParseHFT(msg *quickfix.Message, msgType string) (string, float64, float
 				}
 			}
 
+			// ✅ Incremental에서는 첫 번째 업데이트만 사용 (보통 베스트 레벨)
 			switch mdType.String() {
 			case "0": // BID
-				if bidUpdateCount < 2 {
-					bidUpdates[bidUpdateCount] = PriceLevel{Price: p, Qty: q}
-					bidUpdateCount++
+				if bestBid == 0 { // 첫 번째만
+					bestBid = p
+					bidQty = q
 				}
 			case "1": // OFFER
-				if askUpdateCount < 2 {
-					askUpdates[askUpdateCount] = PriceLevel{Price: p, Qty: q}
-					askUpdateCount++
+				if bestAsk == 0 { // 첫 번째만
+					bestAsk = p
+					askQty = q
 				}
 			}
 		}
-	}
 
-	// ✅ 결과 처리 (인라인 최적화)
-	switch msgType {
-	case "W": // Snapshot
-		if bidCount > 0 {
-			bestBidLevel := findBestBidFast(bids[:bidCount])
-			bestBid = bestBidLevel.Price
-			bidQty = bestBidLevel.Qty
-		}
-		if askCount > 0 {
-			bestAskLevel := findBestAskFast(asks[:askCount])
-			bestAsk = bestAskLevel.Price
-			askQty = bestAskLevel.Qty
-		}
-
-	case "X": // Incremental
-		if bidUpdateCount > 0 {
-			bestBidLevel := bidUpdates[0] // 첫 번째 업데이트 사용
-			bestBid = bestBidLevel.Price
-			bidQty = bestBidLevel.Qty
-		}
-		if askUpdateCount > 0 {
-			bestAskLevel := askUpdates[0] // 첫 번째 업데이트 사용
-			bestAsk = bestAskLevel.Price
-			askQty = bestAskLevel.Qty
+		// 디버깅용 로그
+		if strings.Contains(sym, "117000-C") {
+			log.Printf("[INCREMENTAL-DEBUG] Sym=%s Bid=%.4f(%.1f) Ask=%.4f(%.1f) DelBid=%v DelAsk=%v",
+				sym, bestBid, bidQty, bestAsk, askQty, delBid, delAsk)
 		}
 	}
 
 	return sym, bestBid, bestAsk, bidQty, askQty, delBid, delAsk
-}
-
-// ✅ HFT 최적화: 인라인 정렬 (작은 배열용)
-//
-//go:noinline
-func findBestBidFast(bids []PriceLevel) PriceLevel {
-	if len(bids) == 0 {
-		return PriceLevel{}
-	}
-
-	best := bids[0]
-	for i := 1; i < len(bids); i++ {
-		if bids[i].Price > best.Price {
-			best = bids[i]
-		}
-	}
-	return best
-}
-
-//go:noinline
-func findBestAskFast(asks []PriceLevel) PriceLevel {
-	if len(asks) == 0 {
-		return PriceLevel{}
-	}
-
-	best := asks[0]
-	for i := 1; i < len(asks); i++ {
-		if asks[i].Price < best.Price {
-			best = asks[i]
-		}
-	}
-	return best
-}
-
-// ✅ 기존 함수들 (호환성 유지 - 사용하지 않음)
-func findBestBid(bids []PriceLevel) PriceLevel {
-	if len(bids) == 0 {
-		return PriceLevel{}
-	}
-
-	sort.Slice(bids, func(i, j int) bool {
-		return bids[i].Price > bids[j].Price
-	})
-
-	return bids[0]
-}
-
-func findBestAsk(asks []PriceLevel) PriceLevel {
-	if len(asks) == 0 {
-		return PriceLevel{}
-	}
-
-	sort.Slice(asks, func(i, j int) bool {
-		return asks[i].Price < asks[j].Price
-	})
-
-	return asks[0]
 }
 
 var initiator *quickfix.Initiator
