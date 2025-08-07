@@ -9,56 +9,78 @@ import (
 const MaxOptions = 40
 const cacheLine = 64
 
-// ✅ Go ↔ C++ 공용 메모리 레이아웃
+// ✅ 캐시라인 최적화된 구조체
 type SharedBook struct {
-	IndexPrice float64
-	_          [cacheLine - 8]byte // 64바이트 캐시라인 패딩
-	Books      [MaxOptions]DepthEntry
+	IndexPrice   float64
+	LastUpdateNs int64                // 나노초 타임스탬프
+	_            [cacheLine - 16]byte // 패딩
+	Books        [MaxOptions]DepthEntry
 }
 
-// ✅ DepthEntry는 고정 크기만 유지 (Instrument 제거)
+// ✅ 64바이트 정렬, 브랜치 예측 최적화
 type DepthEntry struct {
-	BidPrice float64
-	BidQty   float64
-	AskPrice float64
-	AskQty   float64
-	_        [cacheLine - 4*8]byte // 64바이트 캐시라인 패딩
+	BidPrice     float64
+	BidQty       float64
+	AskPrice     float64
+	AskQty       float64
+	LastUpdateNs int64
+	_            [cacheLine - 40]byte // 패딩
 }
 
-// ✅ 전역 공유 메모리 인스턴스
+// ✅ 업데이트 정보 - 스택 할당 최적화
+type Update struct {
+	SymbolIdx  int32 // 인덱스로 심볼 식별
+	IsBid      bool
+	Price      float64
+	Qty        float64
+	IndexPrice float64
+	UpdateTime int64 // 나노초
+}
+
 var shared = &SharedBook{}
 
-// ✅ IndexPrice atomic 저장
+//go:noinline
 func SetIndexPrice(v float64) {
+	now := Nanotime()
 	atomic.StoreUint64((*uint64)(unsafe.Pointer(&shared.IndexPrice)), math.Float64bits(v))
+	atomic.StoreInt64(&shared.LastUpdateNs, now)
 }
 
-// ✅ IndexPrice atomic 읽기
+//go:noinline
 func GetIndexPrice() float64 {
 	return math.Float64frombits(atomic.LoadUint64((*uint64)(unsafe.Pointer(&shared.IndexPrice))))
 }
 
-// ✅ 지정 인덱스 Depth atomic 저장
-func WriteDepth(idx int, bid, bidQty, ask, askQty float64) {
+//go:noinline
+func WriteDepthFast(idx int, bid, bidQty, ask, askQty float64) {
 	entry := &shared.Books[idx]
+	now := Nanotime()
+
+	// 원자적 업데이트 - 순서 중요
 	atomic.StoreUint64((*uint64)(unsafe.Pointer(&entry.BidPrice)), math.Float64bits(bid))
 	atomic.StoreUint64((*uint64)(unsafe.Pointer(&entry.BidQty)), math.Float64bits(bidQty))
 	atomic.StoreUint64((*uint64)(unsafe.Pointer(&entry.AskPrice)), math.Float64bits(ask))
 	atomic.StoreUint64((*uint64)(unsafe.Pointer(&entry.AskQty)), math.Float64bits(askQty))
+	atomic.StoreInt64(&entry.LastUpdateNs, now)
 }
 
-// ✅ 지정 인덱스 Depth atomic 읽기
-func ReadDepth(idx int) DepthEntry {
+//go:noinline
+func ReadDepthFast(idx int) DepthEntry {
 	entry := &shared.Books[idx]
 	return DepthEntry{
-		BidPrice: math.Float64frombits(atomic.LoadUint64((*uint64)(unsafe.Pointer(&entry.BidPrice)))),
-		BidQty:   math.Float64frombits(atomic.LoadUint64((*uint64)(unsafe.Pointer(&entry.BidQty)))),
-		AskPrice: math.Float64frombits(atomic.LoadUint64((*uint64)(unsafe.Pointer(&entry.AskPrice)))),
-		AskQty:   math.Float64frombits(atomic.LoadUint64((*uint64)(unsafe.Pointer(&entry.AskQty)))),
+		BidPrice:     math.Float64frombits(atomic.LoadUint64((*uint64)(unsafe.Pointer(&entry.BidPrice)))),
+		BidQty:       math.Float64frombits(atomic.LoadUint64((*uint64)(unsafe.Pointer(&entry.BidQty)))),
+		AskPrice:     math.Float64frombits(atomic.LoadUint64((*uint64)(unsafe.Pointer(&entry.AskPrice)))),
+		AskQty:       math.Float64frombits(atomic.LoadUint64((*uint64)(unsafe.Pointer(&entry.AskQty)))),
+		LastUpdateNs: atomic.LoadInt64(&entry.LastUpdateNs),
 	}
 }
 
-// ✅ Go ↔ C++ 공유 메모리 포인터 노출
+// 런타임 나노초 최적화
+//
+//go:linkname Nanotime runtime.nanotime
+func Nanotime() int64
+
 func SharedMemoryPtr() uintptr {
 	return uintptr(unsafe.Pointer(shared))
 }
