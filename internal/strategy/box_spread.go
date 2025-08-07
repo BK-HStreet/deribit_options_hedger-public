@@ -116,13 +116,19 @@ func (e *BoxSpreadEngine) checkBoxSpread(callSym, putSym string, call data.Depth
 	}
 
 	idxPrice := data.GetIndexPrice()
+
+	// low position
 	usdCallAsk := call.AskPrice * idxPrice
-	usdCallBid := call.BidPrice * idxPrice
-	usdPutAsk := put.AskPrice * idxPrice
 	usdPutBid := put.BidPrice * idxPrice
 
-	log.Printf("Box Check: callSym=%s, putSym=%s, callStrike=%.4f, putStrike=%4.f, call.AskPrice=%.4f, usdCallAsk=%.4f, call.BidPrice=%.4f, usdCallBid=%.4f, put.AskPrice=%.4f, usdPutAsk=%.4f, put.BidPrice=%.4f, usdPutBid=%.4f, expiry=%s || %.4f ||",
-		callSym, putSym, callStrike, putStrike, call.AskPrice, usdCallAsk, call.BidPrice, usdCallBid, put.AskPrice, usdPutAsk, put.BidPrice, usdPutBid, expiry, idxPrice)
+	// high position
+	usdCallBid := call.BidPrice * idxPrice
+	usdPutAsk := put.AskPrice * idxPrice
+
+	if putSym == "BTC-15AUG25-114000-P" && put.AskPrice == 0.0130 {
+		log.Printf("Box Check: callSym=%s, putSym=%s, callStrike=%.4f, putStrike=%4.f, call.AskPrice=%.4f, usdCallAsk=%.4f, call.BidPrice=%.4f, usdCallBid=%.4f, put.AskPrice=%.4f, usdPutAsk=%.4f, put.BidPrice=%.4f, usdPutBid=%.4f, expiry=%s || %.4f ||",
+			callSym, putSym, callStrike, putStrike, call.AskPrice, usdCallAsk, call.BidPrice, usdCallBid, put.AskPrice, usdPutAsk, put.BidPrice, usdPutBid, expiry, idxPrice)
+	}
 
 	return false // benkim.. 복원필
 
