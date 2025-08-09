@@ -1,16 +1,18 @@
-// File: cmd/main.go - BoxSignal 구조체 맞춰서 수정
+// File: cmd/main.go
 package main
 
 import (
 	"Options_Hedger/internal/auth"
 	"Options_Hedger/internal/data"
 	"Options_Hedger/internal/fix"
+	"Options_Hedger/internal/notify" // ← 권장 구조: 별도 패키지
 	"Options_Hedger/internal/strategy"
-	"math"
 
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"os/signal"
@@ -34,8 +36,8 @@ func main() {
 		log.Println("[INFO] .env loaded successfully")
 	}
 
-	// ✅ HFT 최적화: 단일 코어 사용 권장 (컨텍스트 스위칭 최소화)
-	runtime.GOMAXPROCS(1) // HFT는 보통 단일 코어 최적화
+	// HFT: 컨텍스트 스위칭 최소화
+	runtime.GOMAXPROCS(1)
 	runtime.LockOSThread()
 
 	clientID := os.Getenv("DERIBIT_CLIENT_ID")
@@ -43,14 +45,16 @@ func main() {
 	if clientID == "" || clientSecret == "" {
 		log.Fatal("[AUTH] missing DERIBIT_CLIENT_ID or DERIBIT_CLIENT_SECRET")
 	}
-
 	_ = auth.FetchJWTToken(clientID, clientSecret)
 
 	log.Printf("[INFO] Shared memory base pointer: 0x%x", data.SharedMemoryPtr())
 
+	// 초기 인덱스 가격
 	btcPrice := fetchBTCPrice()
 	log.Printf("[INFO] BTC Price: %.2f", btcPrice)
-	data.SetIndexPrice(btcPrice) // ✅ HFT 버전 함수명 수정
+	data.SetIndexPrice(btcPrice)
+
+	// 인스트루먼트 조회 → 가장 가까운 만기(UTC 08:00) 선택 → 해당 만기에서 ATM±20% 필터
 	instruments := fetchInstruments()
 	nearestLabel, expiryUTC := findNearestExpiryUTC(instruments)
 	options := filterOptionsByTS(instruments, expiryUTC, btcPrice)
@@ -59,71 +63,107 @@ func main() {
 	}
 	log.Printf("[INFO] Selected %d options from expiry %s", len(options), nearestLabel)
 
+	// FIX 구독 심볼 세팅
 	fix.SetOptionSymbols(options)
 
-	// ✅ HFT 최적화: 큰 버퍼와 함께 Update 채널
+	// 업데이트 채널 초기화 및 오더북 세팅
 	updateCh := make(chan data.Update, 2048)
 	data.InitOrderBooks(options, updateCh)
 
-	// ✅ HFT 박스 스프레드 엔진 초기화
+	// 박스 스프레드 HFT 엔진
 	engine := strategy.NewBoxSpreadHFT(updateCh)
 	engine.InitializeHFT(options)
 
-	// ✅ 엔진 실행
+	// 텔레그램 노티파이어 (환경변수 없으면 비활성)
+	var notifier notify.Notifier
+	if n, err := notify.NewTelegramFromEnv(); err != nil {
+		log.Printf("[NOTIFY] Telegram disabled: %v", err)
+	} else {
+		notifier = n
+	}
+
+	// 엔진 실행
 	go engine.Run()
 
-	// ✅ 신호 처리 - BoxSignal 구조체에 맞춰 수정
+	// 신호 수신 → 텔레그램 전송 → 삑 → FIX 정리 → 종료
 	go func() {
 		for sig := range engine.Signals() {
-			// HFT BoxSignal 구조체 사용
 			lowCallSym := data.GetSymbolName(int32(sig.LowCallIdx))
 			lowPutSym := data.GetSymbolName(int32(sig.LowPutIdx))
 			highCallSym := data.GetSymbolName(int32(sig.HighCallIdx))
 			highPutSym := data.GetSymbolName(int32(sig.HighPutIdx))
 
-			log.Printf("[BOX_SIGNAL] Profit=$%.2f Strikes:[%.0f-%.0f] "+
-				"BuyCall:%s SellPut:%s SellCall:%s BuyPut:%s LatencyNs:%d",
-				sig.Profit, sig.LowStrike, sig.HighStrike,
-				lowCallSym, lowPutSym, highCallSym, highPutSym,
-				time.Now().UnixNano()-sig.UpdateTimeNs)
+			// 최신 호가 & 인덱스 읽어 메시지 풍부화
+			lowCall := data.ReadDepthFast(int(sig.LowCallIdx))
+			lowPut := data.ReadDepthFast(int(sig.LowPutIdx))
+			highCall := data.ReadDepthFast(int(sig.HighCallIdx))
+			highPut := data.ReadDepthFast(int(sig.HighPutIdx))
+			idx := data.GetIndexPrice()
+
+			msg := formatBoxMessage(
+				sig.LowStrike, sig.HighStrike, idx, sig.Profit,
+				lowCallSym, lowCall.AskPrice, lowCall.AskQty,
+				highCallSym, highCall.BidPrice, highCall.BidQty,
+				lowPutSym, lowPut.BidPrice, lowPut.BidQty,
+				highPutSym, highPut.AskPrice, highPut.AskQty,
+				time.Now().UnixNano()-sig.UpdateTimeNs,
+			)
+
+			log.Print(msg)
+
+			if notifier != nil {
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				if err := notifier.Send(ctx, msg); err != nil {
+					log.Printf("[NOTIFY] telegram send failed: %v", err)
+				}
+				cancel()
+			}
+
+			// 삑
+			fmt.Print("\a")
+
+			// FIX 종료 후 프로세스 종료 (defer는 os.Exit로 실행되지 않으니 직접 정리)
+			fix.StopFIXEngine()
+			time.Sleep(50 * time.Millisecond) // 소켓/로그 플러시 여유
+			os.Exit(0)
 		}
 	}()
 
-	// ✅ 주기적으로 신호 마스크 리셋 (HFT 중복 방지)
+	// 중복 신호 비트마스크 주기적 리셋
 	go func() {
-		ticker := time.NewTicker(100 * time.Millisecond) // 100ms마다 리셋
+		ticker := time.NewTicker(100 * time.Millisecond)
 		defer ticker.Stop()
 		for range ticker.C {
 			engine.ResetSignalMask()
 		}
 	}()
 
-	// ✅ FIX 엔진 시작
+	// FIX 시작
 	if err := fix.InitFIXEngine("config/quickfix.cfg"); err != nil {
 		log.Printf("[FIX] Init failed: %v", err)
 	}
 	defer fix.StopFIXEngine()
 
-	// 종료 신호 대기
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-	<-sig
-
+	// 외부 종료 시그널 대기
+	sigc := make(chan os.Signal, 1)
+	signal.Notify(sigc, syscall.SIGINT, syscall.SIGTERM)
+	<-sigc
 	log.Println("[MAIN] Shutting down...")
 }
 
-// Fetch BTC index price via Deribit REST
+// ───────────────────────── helpers ─────────────────────────
+
 func fetchBTCPrice() float64 {
 	res, err := http.Get("https://www.deribit.com/api/v2/public/get_index_price?index_name=btc_usd")
 	if err != nil {
 		log.Printf("[PRICE] fetch failed, using default: %v", err)
-		return 65000.0 // 기본값
+		return 65000.0
 	}
 	defer res.Body.Close()
 	var r struct {
 		Result struct {
 			IndexPrice float64 `json:"index_price"`
-		}
+		} `json:"result"`
 	}
 	if err := json.NewDecoder(res.Body).Decode(&r); err != nil {
 		log.Printf("[PRICE] decode failed, using default: %v", err)
@@ -132,7 +172,6 @@ func fetchBTCPrice() float64 {
 	return r.Result.IndexPrice
 }
 
-// Fetch all active BTC option instruments
 func fetchInstruments() []Instrument {
 	res, err := http.Get("https://www.deribit.com/api/v2/public/get_instruments?currency=BTC&kind=option")
 	if err != nil {
@@ -157,35 +196,23 @@ func fetchInstruments() []Instrument {
 	return out
 }
 
-// // "15AUG25" 같은 만기 라벨 → 그날의 08:00 UTC (= KST 17:00)
-// func expiryUTCFromLabel(label string) (time.Time, error) {
-// 	const layout = "02Jan06"
-// 	d, err := time.Parse(layout, label) // UTC 기준으로 Y/M/D만 파싱
-// 	if err != nil {
-// 		return time.Time{}, err
-// 	}
-// 	// 그 날짜의 08:00 UTC가 곧 KST 17:00
-// 	return time.Date(d.Year(), d.Month(), d.Day(), 8, 0, 0, 0, time.UTC), nil
-// }
-
+// UTC 기준 가장 가까운 미래 만기 선택 (서버 제공 expiration_timestamp 사용)
 func findNearestExpiryUTC(instruments []Instrument) (label string, expiryUTC time.Time) {
 	nowUTC := time.Now().UTC()
 	var best time.Time
 	seen := make(map[string]bool)
 
 	for _, inst := range instruments {
-		t := time.UnixMilli(inst.ExpireMs).UTC() // ← 서버가 주는 진짜 만기
-		if !t.After(nowUTC) {                    // 지나간 건 제외(= 같으면 제외하고 싶으면 !t.Before(nowUTC)로)
+		t := time.UnixMilli(inst.ExpireMs).UTC()
+		if !t.After(nowUTC) {
 			continue
 		}
-		// label은 심볼에서 빼거나 t로부터 만들기
 		parts := strings.Split(inst.Name, "-") // BTC-10AUG25-115000-C
 		if len(parts) < 3 {
 			continue
 		}
 		lbl := parts[1]
 
-		// 하루에 옵션이 여러 개라서 같은 만기가 반복되므로, 최초 한 번만 후보에 올리면 충분
 		if seen[lbl] {
 			continue
 		}
@@ -200,7 +227,7 @@ func findNearestExpiryUTC(instruments []Instrument) (label string, expiryUTC tim
 		log.Fatal("[EXPIRY] no future expiries found (by timestamp)")
 	}
 
-	// 확인용 로그(원하면 KST 표시 제거 가능)
+	// 참고 로그
 	kst := time.FixedZone("KST", 9*3600)
 	log.Printf("[INFO] Nearest expiry: %s (UTC %s / KST %s)",
 		label,
@@ -210,49 +237,7 @@ func findNearestExpiryUTC(instruments []Instrument) (label string, expiryUTC tim
 	return label, best
 }
 
-// // Find nearest expiry from the instrument list
-// func findNearestExpiry(instruments []string) string {
-// 	nowUTC := time.Now().UTC()
-
-// 	// 라벨 -> 만기(UTC 08:00) 중 아직 안 지난 것만
-// 	m := make(map[string]time.Time)
-// 	for _, name := range instruments {
-// 		parts := strings.Split(name, "-") // e.g. BTC-15AUG25-115000-C
-// 		if len(parts) < 3 {
-// 			continue
-// 		}
-// 		lbl := parts[1]
-// 		if _, ok := m[lbl]; ok {
-// 			continue
-// 		}
-
-// 		tUTC, err := expiryUTCFromLabel(lbl)
-// 		if err == nil && tUTC.After(nowUTC) {
-// 			m[lbl] = tUTC
-// 		}
-// 	}
-// 	if len(m) == 0 {
-// 		log.Fatal("[EXPIRY] no future expiries found")
-// 	}
-
-// 	type item struct {
-// 		lbl string
-// 		t   time.Time
-// 	}
-// 	list := make([]item, 0, len(m))
-// 	for lbl, t := range m {
-// 		list = append(list, item{lbl, t})
-// 	}
-// 	sort.Slice(list, func(i, j int) bool { return list[i].t.Before(list[j].t) })
-
-//		kst := time.FixedZone("KST", 9*3600)
-//		log.Printf("[INFO] Nearest expiry: %s (UTC %s / KST %s)",
-//			list[0].lbl,
-//			list[0].t.Format(time.RFC3339),
-//			list[0].t.In(kst).Format("2006-01-02 15:04:05"),
-//		)
-//		return list[0].lbl
-//	}
+// expiration_timestamp(UTC)로 정확하게 필터링 + ATM±20%
 func filterOptionsByTS(instruments []Instrument, expiryUTC time.Time, atmPrice float64) []string {
 	type opt struct {
 		name     string
@@ -267,7 +252,7 @@ func filterOptionsByTS(instruments []Instrument, expiryUTC time.Time, atmPrice f
 			continue
 		}
 		t := time.UnixMilli(inst.ExpireMs).UTC()
-		if !t.Equal(expiryUTC) { // 정확히 그 만기만
+		if !t.Equal(expiryUTC) {
 			continue
 		}
 		parts := strings.Split(inst.Name, "-")
@@ -314,79 +299,28 @@ func filterOptionsByTS(instruments []Instrument, expiryUTC time.Time, atmPrice f
 	return out
 }
 
-// // ✅ ATM 필터링 최적화
-// func filterOptions(instruments []string, expiry string, atmPrice float64) []string {
-// 	type opt struct {
-// 		name     string
-// 		strike   float64
-// 		distance float64
-// 		isCall   bool
-// 	}
-
-// 	var list []opt
-// 	for _, name := range instruments {
-// 		if !strings.Contains(name, expiry) {
-// 			continue
-// 		}
-
-// 		parts := strings.Split(name, "-")
-// 		if len(parts) < 4 {
-// 			continue
-// 		}
-
-// 		var s float64
-// 		if _, err := fmt.Sscanf(parts[2], "%f", &s); err != nil {
-// 			continue
-// 		}
-
-// 		// ✅ ATM 근처 옵션만 선택 (±20% 범위)
-// 		distance := abs(s - atmPrice)
-// 		if distance > atmPrice*0.2 { // 20% 범위 벗어나면 스킵
-// 			continue
-// 		}
-
-// 		isCall := parts[3] == "C"
-// 		list = append(list, opt{name, s, distance, isCall})
-// 	}
-
-// 	// ✅ ATM 거리순 정렬
-// 	sort.Slice(list, func(i, j int) bool {
-// 		return list[i].distance < list[j].distance
-// 	})
-
-// 	// ✅ Call/Put 균형 맞추기 (박스 스프레드를 위해)
-// 	callCount := 0
-// 	putCount := 0
-// 	balanced := make([]opt, 0, len(list))
-
-// 	for _, o := range list {
-// 		if o.isCall && callCount < data.MaxOptions/2 {
-// 			balanced = append(balanced, o)
-// 			callCount++
-// 		} else if !o.isCall && putCount < data.MaxOptions/2 {
-// 			balanced = append(balanced, o)
-// 			putCount++
-// 		}
-
-// 		if len(balanced) >= data.MaxOptions {
-// 			break
-// 		}
-// 	}
-
-// 	out := make([]string, len(balanced))
-// 	for i, o := range balanced {
-// 		out[i] = o.name
-// 	}
-
-// 	log.Printf("[INFO] Filtered to %d options (%d calls, %d puts) within %.0f%% of ATM",
-// 		len(out), callCount, putCount, 20.0)
-
-// 	return out
-// }
-
-func abs(x float64) float64 {
-	if x < 0 {
-		return -x
-	}
-	return x
+// 텔레그램/로그용 메시지 포맷
+func formatBoxMessage(
+	lowStrike, highStrike, indexPrice, profit float64,
+	lowCallSym string, lowCallAsk, lowCallAskQty float64,
+	highCallSym string, highCallBid, highCallBidQty float64,
+	lowPutSym string, lowPutBid, lowPutBidQty float64,
+	highPutSym string, highPutAsk, highPutAskQty float64,
+	latencyNs int64,
+) string {
+	return fmt.Sprintf(
+		"[BOX-SPREAD]\n"+
+			"strikes=%.0f→%.0f  index=%.2f  profit=$%.2f\n"+
+			"buyCallLo: %s  ask@%.4f (qty=%.2f)\n"+
+			"sellCallHi: %s  bid@%.4f (qty=%.2f)\n"+
+			"sellPutLo: %s  bid@%.4f (qty=%.2f)\n"+
+			"buyPutHi: %s  ask@%.4f (qty=%.2f)\n"+
+			"latency(ns)=%d",
+		lowStrike, highStrike, indexPrice, profit,
+		lowCallSym, lowCallAsk, lowCallAskQty,
+		highCallSym, highCallBid, highCallBidQty,
+		lowPutSym, lowPutBid, lowPutBidQty,
+		highPutSym, highPutAsk, highPutAskQty,
+		latencyNs,
+	)
 }

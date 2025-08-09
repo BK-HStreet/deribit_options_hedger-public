@@ -2,13 +2,14 @@ package strategy
 
 import (
 	"Options_Hedger/internal/data"
+	"Options_Hedger/internal/notify"
+	"context"
 	"fmt"
-	"log"
 	"math"
-	"os"
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"time"
 )
 
 // ✅ 메모리 효율적인 옵션 정보 (32바이트)
@@ -48,6 +49,7 @@ type BoxSpreadHFT struct {
 	// ✅ 중복 제거 (비트마스크)
 	recentSignals uint64 // 최근 64개 신호 비트마스크
 	lastCheck     int64  // 마지막 체크 시간
+	notifier      notify.Notifier
 }
 
 func NewBoxSpreadHFT(ch chan data.Update) *BoxSpreadHFT {
@@ -56,6 +58,8 @@ func NewBoxSpreadHFT(ch chan data.Update) *BoxSpreadHFT {
 		signals: make(chan BoxSignal, 128), // 버퍼 크기 줄임
 	}
 }
+
+func (e *BoxSpreadHFT) SetNotifier(n notify.Notifier) { e.notifier = n }
 
 //go:noinline
 func (e *BoxSpreadHFT) InitializeHFT(symbols []string) {
@@ -232,10 +236,13 @@ func (e *BoxSpreadHFT) checkBoxFast(idx1, idx2 int, indexPrice float64) {
 	if profit > 1.0 { // $5 최소 수익
 
 		// benkim..복원필
-		log.Printf(
-			"[BOX-SPREAD] strikes=%.0f→%.0f index=%.2f  "+
-				"buyCallLo=ask@%.4f(qty=%.2f)  sellCallHi=bid@%.4f(qty=%.2f)  "+
-				"sellPutLo=bid@%.4f(qty=%.2f)  buyPutHi=ask@%.4f(qty=%.2f)  profit=%.2f",
+		msg := fmt.Sprintf(
+			"[BOX-SPREAD]\nstrikes=%.0f→%.0f  index=%.2f\n"+
+				"buyCallLo: ask@%.4f (qty=%.2f)\n"+
+				"sellCallHi: bid@%.4f (qty=%.2f)\n"+
+				"sellPutLo: bid@%.4f (qty=%.2f)\n"+
+				"buyPutHi: ask@%.4f (qty=%.2f)\n"+
+				"profit=%.2f",
 			lowStrike, highStrike, indexPrice,
 			lowCall.AskPrice, lowCall.AskQty,
 			highCall.BidPrice, highCall.BidQty,
@@ -243,11 +250,15 @@ func (e *BoxSpreadHFT) checkBoxFast(idx1, idx2 int, indexPrice float64) {
 			highPut.AskPrice, highPut.AskQty,
 			profit,
 		)
-		// benkim..end
 
 		fmt.Print("\a") // 소리
-		// 안전하게 종료
-		os.Exit(0)
+		// 탐지 지점
+		if e.notifier != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			_ = e.notifier.Send(ctx, msg)
+			cancel()
+		}
+		// benkim..end
 
 		signal := BoxSignal{
 			LowCallIdx:   lowCallIdx,
