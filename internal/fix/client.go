@@ -414,9 +414,9 @@ func fastParseHFT(msg *quickfix.Message, msgType string) (string, float64, float
 			}
 		}
 
-		// 디버깅용 로그
-		log.Printf("[INCREMENTAL-DEBUG] Sym=%s Bid=%.4f(%.1f) Ask=%.4f(%.1f) DelBid=%v DelAsk=%v",
-			sym, bestBid, bidQty, bestAsk, askQty, delBid, delAsk)
+		// // 디버깅용 로그
+		// log.Printf("[INCREMENTAL-DEBUG] Sym=%s Bid=%.4f(%.1f) Ask=%.4f(%.1f) DelBid=%v DelAsk=%v",
+		// 	sym, bestBid, bidQty, bestAsk, askQty, delBid, delAsk)
 
 	}
 

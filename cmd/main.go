@@ -122,10 +122,10 @@ func main() {
 			// 삑
 			fmt.Print("\a")
 
-			// FIX 종료 후 프로세스 종료 (defer는 os.Exit로 실행되지 않으니 직접 정리)
-			fix.StopFIXEngine()
-			time.Sleep(50 * time.Millisecond) // 소켓/로그 플러시 여유
-			os.Exit(0)
+			// // FIX 종료 후 프로세스 종료 (defer는 os.Exit로 실행되지 않으니 직접 정리)
+			// fix.StopFIXEngine()
+			// time.Sleep(50 * time.Millisecond) // 소켓/로그 플러시 여유
+			// os.Exit(0)
 		}
 	}()
 
