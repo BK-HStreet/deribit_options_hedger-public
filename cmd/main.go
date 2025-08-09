@@ -6,6 +6,7 @@ import (
 	"Options_Hedger/internal/data"
 	"Options_Hedger/internal/fix"
 	"Options_Hedger/internal/strategy"
+	"math"
 
 	"encoding/json"
 	"fmt"
@@ -21,6 +22,12 @@ import (
 
 	"github.com/joho/godotenv"
 )
+
+type Instrument struct {
+	Name     string `json:"instrument_name"`
+	IsActive bool   `json:"is_active"`
+	ExpireMs int64  `json:"expiration_timestamp"`
+}
 
 func main() {
 	if err := godotenv.Load(); err == nil {
@@ -44,15 +51,14 @@ func main() {
 	btcPrice := fetchBTCPrice()
 	log.Printf("[INFO] BTC Price: %.2f", btcPrice)
 	data.SetIndexPrice(btcPrice) // ✅ HFT 버전 함수명 수정
-
 	instruments := fetchInstruments()
-	nearestExpiry := findNearestExpiry(instruments)
-	options := filterOptions(instruments, nearestExpiry, btcPrice)
+	nearestLabel, expiryUTC := findNearestExpiryUTC(instruments)
+	options := filterOptionsByTS(instruments, expiryUTC, btcPrice)
 	if len(options) > data.MaxOptions {
 		options = options[:data.MaxOptions]
 	}
+	log.Printf("[INFO] Selected %d options from expiry %s", len(options), nearestLabel)
 
-	log.Printf("[INFO] Selected %d options from expiry %s", len(options), nearestExpiry)
 	fix.SetOptionSymbols(options)
 
 	// ✅ HFT 최적화: 큰 버퍼와 함께 Update 채널
@@ -127,122 +133,173 @@ func fetchBTCPrice() float64 {
 }
 
 // Fetch all active BTC option instruments
-func fetchInstruments() []string {
+func fetchInstruments() []Instrument {
 	res, err := http.Get("https://www.deribit.com/api/v2/public/get_instruments?currency=BTC&kind=option")
 	if err != nil {
 		log.Fatal("[INSTR] fetch failed:", err)
 	}
 	defer res.Body.Close()
+
 	var r struct {
-		Result []struct {
-			InstrumentName string `json:"instrument_name"`
-			IsActive       bool   `json:"is_active"`
-		}
+		Result []Instrument `json:"result"`
 	}
 	if err := json.NewDecoder(res.Body).Decode(&r); err != nil {
 		log.Fatal("[INSTR] decode failed:", err)
 	}
-	names := make([]string, 0, len(r.Result))
+
+	out := make([]Instrument, 0, len(r.Result))
 	for _, inst := range r.Result {
 		if inst.IsActive {
-			names = append(names, inst.InstrumentName)
+			out = append(out, inst)
 		}
 	}
-	log.Printf("[INFO] Fetched %d active instruments", len(names))
-	return names
+	log.Printf("[INFO] Fetched %d active instruments", len(out))
+	return out
 }
 
-// Find nearest expiry from the instrument list
-func findNearestExpiry(instruments []string) string {
-	layout := "02Jan06"
-	expMap := map[string]time.Time{}
-	now := time.Now()
+// // "15AUG25" 같은 만기 라벨 → 그날의 08:00 UTC (= KST 17:00)
+// func expiryUTCFromLabel(label string) (time.Time, error) {
+// 	const layout = "02Jan06"
+// 	d, err := time.Parse(layout, label) // UTC 기준으로 Y/M/D만 파싱
+// 	if err != nil {
+// 		return time.Time{}, err
+// 	}
+// 	// 그 날짜의 08:00 UTC가 곧 KST 17:00
+// 	return time.Date(d.Year(), d.Month(), d.Day(), 8, 0, 0, 0, time.UTC), nil
+// }
 
-	for _, name := range instruments {
-		parts := strings.Split(name, "-")
+func findNearestExpiryUTC(instruments []Instrument) (label string, expiryUTC time.Time) {
+	nowUTC := time.Now().UTC()
+	var best time.Time
+	seen := make(map[string]bool)
+
+	for _, inst := range instruments {
+		t := time.UnixMilli(inst.ExpireMs).UTC() // ← 서버가 주는 진짜 만기
+		if !t.After(nowUTC) {                    // 지나간 건 제외(= 같으면 제외하고 싶으면 !t.Before(nowUTC)로)
+			continue
+		}
+		// label은 심볼에서 빼거나 t로부터 만들기
+		parts := strings.Split(inst.Name, "-") // BTC-10AUG25-115000-C
 		if len(parts) < 3 {
 			continue
 		}
-		if _, ok := expMap[parts[1]]; !ok {
-			t, err := time.Parse(layout, parts[1])
-			if err == nil && t.After(now) { // ✅ 미래 만료일만 선택
-				expMap[parts[1]] = t
-			}
+		lbl := parts[1]
+
+		// 하루에 옵션이 여러 개라서 같은 만기가 반복되므로, 최초 한 번만 후보에 올리면 충분
+		if seen[lbl] {
+			continue
+		}
+		seen[lbl] = true
+
+		if best.IsZero() || t.Before(best) {
+			best, label = t, lbl
 		}
 	}
 
-	type p struct {
-		label string
-		t     time.Time
-	}
-	list := make([]p, 0, len(expMap))
-	for lbl, tm := range expMap {
-		list = append(list, p{lbl, tm})
-	}
-	sort.Slice(list, func(i, j int) bool { return list[i].t.Before(list[j].t) })
-
-	if len(list) == 0 {
-		log.Fatal("[EXPIRY] no future expiries found")
+	if best.IsZero() {
+		log.Fatal("[EXPIRY] no future expiries found (by timestamp)")
 	}
 
-	log.Printf("[INFO] Nearest expiry: %s (%s)", list[0].label, list[0].t.Format("2006-01-02"))
-	return list[0].label
+	// 확인용 로그(원하면 KST 표시 제거 가능)
+	kst := time.FixedZone("KST", 9*3600)
+	log.Printf("[INFO] Nearest expiry: %s (UTC %s / KST %s)",
+		label,
+		best.Format(time.RFC3339),
+		best.In(kst).Format("2006-01-02 15:04:05"),
+	)
+	return label, best
 }
 
-// ✅ ATM 필터링 최적화
-func filterOptions(instruments []string, expiry string, atmPrice float64) []string {
+// // Find nearest expiry from the instrument list
+// func findNearestExpiry(instruments []string) string {
+// 	nowUTC := time.Now().UTC()
+
+// 	// 라벨 -> 만기(UTC 08:00) 중 아직 안 지난 것만
+// 	m := make(map[string]time.Time)
+// 	for _, name := range instruments {
+// 		parts := strings.Split(name, "-") // e.g. BTC-15AUG25-115000-C
+// 		if len(parts) < 3 {
+// 			continue
+// 		}
+// 		lbl := parts[1]
+// 		if _, ok := m[lbl]; ok {
+// 			continue
+// 		}
+
+// 		tUTC, err := expiryUTCFromLabel(lbl)
+// 		if err == nil && tUTC.After(nowUTC) {
+// 			m[lbl] = tUTC
+// 		}
+// 	}
+// 	if len(m) == 0 {
+// 		log.Fatal("[EXPIRY] no future expiries found")
+// 	}
+
+// 	type item struct {
+// 		lbl string
+// 		t   time.Time
+// 	}
+// 	list := make([]item, 0, len(m))
+// 	for lbl, t := range m {
+// 		list = append(list, item{lbl, t})
+// 	}
+// 	sort.Slice(list, func(i, j int) bool { return list[i].t.Before(list[j].t) })
+
+//		kst := time.FixedZone("KST", 9*3600)
+//		log.Printf("[INFO] Nearest expiry: %s (UTC %s / KST %s)",
+//			list[0].lbl,
+//			list[0].t.Format(time.RFC3339),
+//			list[0].t.In(kst).Format("2006-01-02 15:04:05"),
+//		)
+//		return list[0].lbl
+//	}
+func filterOptionsByTS(instruments []Instrument, expiryUTC time.Time, atmPrice float64) []string {
 	type opt struct {
 		name     string
 		strike   float64
 		distance float64
 		isCall   bool
 	}
-
 	var list []opt
-	for _, name := range instruments {
-		if !strings.Contains(name, expiry) {
+
+	for _, inst := range instruments {
+		if !inst.IsActive {
 			continue
 		}
-
-		parts := strings.Split(name, "-")
+		t := time.UnixMilli(inst.ExpireMs).UTC()
+		if !t.Equal(expiryUTC) { // 정확히 그 만기만
+			continue
+		}
+		parts := strings.Split(inst.Name, "-")
 		if len(parts) < 4 {
 			continue
 		}
-
 		var s float64
 		if _, err := fmt.Sscanf(parts[2], "%f", &s); err != nil {
 			continue
 		}
-
-		// ✅ ATM 근처 옵션만 선택 (±20% 범위)
-		distance := abs(s - atmPrice)
-		if distance > atmPrice*0.2 { // 20% 범위 벗어나면 스킵
+		distance := math.Abs(s - atmPrice)
+		if distance > atmPrice*0.2 {
 			continue
 		}
-
 		isCall := parts[3] == "C"
-		list = append(list, opt{name, s, distance, isCall})
+		list = append(list, opt{inst.Name, s, distance, isCall})
 	}
 
-	// ✅ ATM 거리순 정렬
-	sort.Slice(list, func(i, j int) bool {
-		return list[i].distance < list[j].distance
-	})
+	sort.Slice(list, func(i, j int) bool { return list[i].distance < list[j].distance })
 
-	// ✅ Call/Put 균형 맞추기 (박스 스프레드를 위해)
-	callCount := 0
-	putCount := 0
+	callCap := data.MaxOptions / 2
+	putCap := data.MaxOptions / 2
+	callCount, putCount := 0, 0
 	balanced := make([]opt, 0, len(list))
-
 	for _, o := range list {
-		if o.isCall && callCount < data.MaxOptions/2 {
+		if o.isCall && callCount < callCap {
 			balanced = append(balanced, o)
 			callCount++
-		} else if !o.isCall && putCount < data.MaxOptions/2 {
+		} else if !o.isCall && putCount < putCap {
 			balanced = append(balanced, o)
 			putCount++
 		}
-
 		if len(balanced) >= data.MaxOptions {
 			break
 		}
@@ -252,12 +309,80 @@ func filterOptions(instruments []string, expiry string, atmPrice float64) []stri
 	for i, o := range balanced {
 		out[i] = o.name
 	}
-
 	log.Printf("[INFO] Filtered to %d options (%d calls, %d puts) within %.0f%% of ATM",
 		len(out), callCount, putCount, 20.0)
-
 	return out
 }
+
+// // ✅ ATM 필터링 최적화
+// func filterOptions(instruments []string, expiry string, atmPrice float64) []string {
+// 	type opt struct {
+// 		name     string
+// 		strike   float64
+// 		distance float64
+// 		isCall   bool
+// 	}
+
+// 	var list []opt
+// 	for _, name := range instruments {
+// 		if !strings.Contains(name, expiry) {
+// 			continue
+// 		}
+
+// 		parts := strings.Split(name, "-")
+// 		if len(parts) < 4 {
+// 			continue
+// 		}
+
+// 		var s float64
+// 		if _, err := fmt.Sscanf(parts[2], "%f", &s); err != nil {
+// 			continue
+// 		}
+
+// 		// ✅ ATM 근처 옵션만 선택 (±20% 범위)
+// 		distance := abs(s - atmPrice)
+// 		if distance > atmPrice*0.2 { // 20% 범위 벗어나면 스킵
+// 			continue
+// 		}
+
+// 		isCall := parts[3] == "C"
+// 		list = append(list, opt{name, s, distance, isCall})
+// 	}
+
+// 	// ✅ ATM 거리순 정렬
+// 	sort.Slice(list, func(i, j int) bool {
+// 		return list[i].distance < list[j].distance
+// 	})
+
+// 	// ✅ Call/Put 균형 맞추기 (박스 스프레드를 위해)
+// 	callCount := 0
+// 	putCount := 0
+// 	balanced := make([]opt, 0, len(list))
+
+// 	for _, o := range list {
+// 		if o.isCall && callCount < data.MaxOptions/2 {
+// 			balanced = append(balanced, o)
+// 			callCount++
+// 		} else if !o.isCall && putCount < data.MaxOptions/2 {
+// 			balanced = append(balanced, o)
+// 			putCount++
+// 		}
+
+// 		if len(balanced) >= data.MaxOptions {
+// 			break
+// 		}
+// 	}
+
+// 	out := make([]string, len(balanced))
+// 	for i, o := range balanced {
+// 		out[i] = o.name
+// 	}
+
+// 	log.Printf("[INFO] Filtered to %d options (%d calls, %d puts) within %.0f%% of ATM",
+// 		len(out), callCount, putCount, 20.0)
+
+// 	return out
+// }
 
 func abs(x float64) float64 {
 	if x < 0 {

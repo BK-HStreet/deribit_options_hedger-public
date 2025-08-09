@@ -2,8 +2,10 @@ package strategy
 
 import (
 	"Options_Hedger/internal/data"
+	"fmt"
 	"log"
 	"math"
+	"os"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -227,21 +229,25 @@ func (e *BoxSpreadHFT) checkBoxFast(idx1, idx2 int, indexPrice float64) {
 	expectedValue := highStrike - lowStrike
 	profit := expectedValue - netCost
 
-	// benkim..복원필
-	log.Printf(
-		"[BOX-SPREAD] strikes=%.0f→%.0f index=%.2f  "+
-			"buyCallLo=ask@%.4f(qty=%.2f)  sellCallHi=bid@%.4f(qty=%.2f)  "+
-			"sellPutLo=bid@%.4f(qty=%.2f)  buyPutHi=ask@%.4f(qty=%.2f)  profit=%.2f",
-		lowStrike, highStrike, indexPrice,
-		lowCall.AskPrice, lowCall.AskQty,
-		highCall.BidPrice, highCall.BidQty,
-		lowPut.BidPrice, lowPut.BidQty,
-		highPut.AskPrice, highPut.AskQty,
-		profit,
-	)
-	// benkim..end
+	if profit > 1.0 { // $5 최소 수익
 
-	if profit > 5.0 { // $5 최소 수익
+		// benkim..복원필
+		log.Printf(
+			"[BOX-SPREAD] strikes=%.0f→%.0f index=%.2f  "+
+				"buyCallLo=ask@%.4f(qty=%.2f)  sellCallHi=bid@%.4f(qty=%.2f)  "+
+				"sellPutLo=bid@%.4f(qty=%.2f)  buyPutHi=ask@%.4f(qty=%.2f)  profit=%.2f",
+			lowStrike, highStrike, indexPrice,
+			lowCall.AskPrice, lowCall.AskQty,
+			highCall.BidPrice, highCall.BidQty,
+			lowPut.BidPrice, lowPut.BidQty,
+			highPut.AskPrice, highPut.AskQty,
+			profit,
+		)
+		// benkim..end
+
+		fmt.Print("\a") // 소리
+		// 안전하게 종료
+		os.Exit(0)
 
 		signal := BoxSignal{
 			LowCallIdx:   lowCallIdx,
