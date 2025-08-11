@@ -311,16 +311,14 @@ func formatBoxMessage(
 	return fmt.Sprintf(
 		"[BOX-SPREAD]\n"+
 			"strikes=%.0f→%.0f  index=%.2f  profit=$%.2f\n"+
-			"buyCallLo: %s  ask@%.4f (qty=%.2f)\n"+
-			"sellCallHi: %s  bid@%.4f (qty=%.2f)\n"+
-			"sellPutLo: %s  bid@%.4f (qty=%.2f)\n"+
-			"buyPutHi: %s  ask@%.4f (qty=%.2f)\n"+
-			"latency(ns)=%d",
+			"buyCallLo: %s  ask@%.4f (qty=%.4f)\n"+
+			"sellCallHi: %s  bid@%.4f (qty=%.4f)\n"+
+			"sellPutLo: %s  bid@%.4f (qty=%.4f)\n"+
+			"buyPutHi: %s  ask@%.4f (qty=%.4f)",
 		lowStrike, highStrike, indexPrice, profit,
 		lowCallSym, lowCallAsk, lowCallAskQty,
 		highCallSym, highCallBid, highCallBidQty,
 		lowPutSym, lowPutBid, lowPutBidQty,
 		highPutSym, highPutAsk, highPutAskQty,
-		latencyNs,
 	)
 }

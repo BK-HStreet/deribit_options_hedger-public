@@ -3,13 +3,10 @@ package strategy
 import (
 	"Options_Hedger/internal/data"
 	"Options_Hedger/internal/notify"
-	"context"
-	"fmt"
 	"math"
 	"strconv"
 	"strings"
 	"sync/atomic"
-	"time"
 )
 
 // ✅ 메모리 효율적인 옵션 정보 (32바이트)
@@ -234,31 +231,6 @@ func (e *BoxSpreadHFT) checkBoxFast(idx1, idx2 int, indexPrice float64) {
 	profit := expectedValue - netCost
 
 	if profit > 1.0 { // $5 최소 수익
-
-		// benkim..복원필
-		msg := fmt.Sprintf(
-			"[BOX-SPREAD]\nstrikes=%.0f→%.0f  index=%.2f\n"+
-				"buyCallLo: ask@%.4f (qty=%.2f)\n"+
-				"sellCallHi: bid@%.4f (qty=%.2f)\n"+
-				"sellPutLo: bid@%.4f (qty=%.2f)\n"+
-				"buyPutHi: ask@%.4f (qty=%.2f)\n"+
-				"profit=%.2f",
-			lowStrike, highStrike, indexPrice,
-			lowCall.AskPrice, lowCall.AskQty,
-			highCall.BidPrice, highCall.BidQty,
-			lowPut.BidPrice, lowPut.BidQty,
-			highPut.AskPrice, highPut.AskQty,
-			profit,
-		)
-
-		fmt.Print("\a") // 소리
-		// 탐지 지점
-		if e.notifier != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			_ = e.notifier.Send(ctx, msg)
-			cancel()
-		}
-		// benkim..end
 
 		signal := BoxSignal{
 			LowCallIdx:   lowCallIdx,
