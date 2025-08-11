@@ -106,7 +106,6 @@ func main() {
 				highCallSym, highCall.BidPrice, highCall.BidQty,
 				lowPutSym, lowPut.BidPrice, lowPut.BidQty,
 				highPutSym, highPut.AskPrice, highPut.AskQty,
-				time.Now().UnixNano()-sig.UpdateTimeNs,
 			)
 
 			log.Print(msg)
@@ -306,7 +305,6 @@ func formatBoxMessage(
 	highCallSym string, highCallBid, highCallBidQty float64,
 	lowPutSym string, lowPutBid, lowPutBidQty float64,
 	highPutSym string, highPutAsk, highPutAskQty float64,
-	latencyNs int64,
 ) string {
 	return fmt.Sprintf(
 		"[BOX-SPREAD]\n"+
