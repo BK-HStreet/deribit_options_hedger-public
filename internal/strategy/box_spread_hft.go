@@ -220,6 +220,11 @@ func (e *BoxSpreadHFT) checkBoxFast(idx1, idx2 int, indexPrice float64) {
 	highCall := data.ReadDepthFast(int(highCallIdx))
 	highPut := data.ReadDepthFast(int(highPutIdx))
 
+	// 수량 유효성 체크
+	if lowCall.AskQty <= 0 || lowPut.BidQty <= 0 ||
+		highCall.BidQty <= 0 || highPut.AskQty <= 0 {
+		return
+	}
 	// 가격 유효성 체크
 	if lowCall.AskPrice <= 0 || lowPut.BidPrice <= 0 ||
 		highCall.BidPrice <= 0 || highPut.AskPrice <= 0 || indexPrice <= 0 {
