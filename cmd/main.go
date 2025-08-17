@@ -100,7 +100,13 @@ func main() {
 			highPut := data.ReadDepthFast(int(sig.HighPutIdx))
 			idx := data.GetIndexPrice()
 
-			msg := formatBoxMessage(
+			msg := fmt.Sprintf(
+				"[BOX-SPREAD]\n"+
+					"strikes=%.0f→%.0f  index=%.2f  profit=$%.2f\n"+
+					"buyCallLo: %s  ask@%.4f (qty=%.4f)\n"+
+					"sellCallHi: %s  bid@%.4f (qty=%.4f)\n"+
+					"sellPutLo: %s  bid@%.4f (qty=%.4f)\n"+
+					"buyPutHi: %s  ask@%.4f (qty=%.4f)",
 				sig.LowStrike, sig.HighStrike, idx, sig.Profit,
 				lowCallSym, lowCall.AskPrice, lowCall.AskQty,
 				highCallSym, highCall.BidPrice, highCall.BidQty,
@@ -296,27 +302,4 @@ func filterOptionsByTS(instruments []Instrument, expiryUTC time.Time, atmPrice f
 	log.Printf("[INFO] Filtered to %d options (%d calls, %d puts) within %.0f%% of ATM",
 		len(out), callCount, putCount, 20.0)
 	return out
-}
-
-// 텔레그램/로그용 메시지 포맷
-func formatBoxMessage(
-	lowStrike, highStrike, indexPrice, profit float64,
-	lowCallSym string, lowCallAsk, lowCallAskQty float64,
-	highCallSym string, highCallBid, highCallBidQty float64,
-	lowPutSym string, lowPutBid, lowPutBidQty float64,
-	highPutSym string, highPutAsk, highPutAskQty float64,
-) string {
-	return fmt.Sprintf(
-		"[BOX-SPREAD]\n"+
-			"strikes=%.0f→%.0f  index=%.2f  profit=$%.2f\n"+
-			"buyCallLo: %s  ask@%.4f (qty=%.4f)\n"+
-			"sellCallHi: %s  bid@%.4f (qty=%.4f)\n"+
-			"sellPutLo: %s  bid@%.4f (qty=%.4f)\n"+
-			"buyPutHi: %s  ask@%.4f (qty=%.4f)",
-		lowStrike, highStrike, indexPrice, profit,
-		lowCallSym, lowCallAsk, lowCallAskQty,
-		highCallSym, highCallBid, highCallBidQty,
-		lowPutSym, lowPutBid, lowPutBidQty,
-		highPutSym, highPutAsk, highPutAskQty,
-	)
 }
