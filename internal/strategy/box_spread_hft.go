@@ -83,8 +83,8 @@ func NewBoxSpreadHFT(ch chan data.Update) *BoxSpreadHFT {
 		maxQty:        0,
 		feePerLegUSD:  0.0,
 		feePerLegRate: 0.0001, // 0.01%
-		useBandCheck:  true,
-		smin:          0, // 0 → index 기반 fallback 사용
+		useBandCheck:  false,  // true=동적밴드를 위아래 1% 사용하겠다는 의미
+		smin:          0,      // 0 → index 기반 fallback 사용
 		smax:          0,
 	}
 }
