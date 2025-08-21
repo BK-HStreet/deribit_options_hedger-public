@@ -9,8 +9,9 @@ import (
 )
 
 const (
-	BoxLong  int8 = +1
-	BoxShort int8 = -1
+	BoxLong    int8    = +1
+	BoxShort   int8    = -1
+	legsPerBox float64 = 4.0
 )
 
 // OptionInfo: compact option metadata (32 bytes)
@@ -108,8 +109,6 @@ func (e *BoxSpreadHFT) SetNotifier(n notify.Notifier) { e.notifier = n }
 // InitializeHFT ingests the pre-selected symbols universe for detection.
 // Expected symbol format: UNDERLYING-EXPIRY-STRIKE-C|P (e.g., BTC-15AUG25-116000-C)
 // Expiries are indexed to compact OptionInfo entries.
-//
-//go:noinline
 func (e *BoxSpreadHFT) InitializeHFT(symbols []string) {
 	count := len(symbols)
 	if count > data.MaxOptions {
@@ -147,8 +146,6 @@ func (e *BoxSpreadHFT) InitializeHFT(symbols []string) {
 }
 
 // buildPairLookup precomputes eligible pairs by same expiry and different strikes.
-//
-//go:noinline
 func (e *BoxSpreadHFT) buildPairLookup() {
 	count := int(e.optionCount)
 	for i := 0; i < count; i++ {
@@ -164,8 +161,6 @@ func (e *BoxSpreadHFT) buildPairLookup() {
 }
 
 // Run consumes updates and triggers detection.
-//
-//go:noinline
 func (e *BoxSpreadHFT) Run() {
 	for update := range e.updates {
 		e.processUpdateHFT(update)
@@ -173,8 +168,6 @@ func (e *BoxSpreadHFT) Run() {
 }
 
 // processUpdateHFT debounces and checks pairs related to the updated symbol.
-//
-//go:noinline
 func (e *BoxSpreadHFT) processUpdateHFT(update data.Update) {
 	idx := int(update.SymbolIdx)
 	if idx >= int(e.optionCount) {
@@ -199,7 +192,7 @@ func (e *BoxSpreadHFT) processUpdateHFT(update data.Update) {
 // passFlatnessDirectional applies either legacy symmetric flatness or directional band on slope.
 // slope := dPnL/dS per 1 qty = -netBTC/Q.
 func (e *BoxSpreadHFT) passFlatnessDirectional(slope float64) bool {
-	// Helper abs without importing math
+	// lightweight abs
 	abs := slope
 	if abs < 0 {
 		abs = -abs
@@ -258,8 +251,6 @@ func (e *BoxSpreadHFT) passFlatnessDirectional(slope float64) bool {
 
 // checkBoxFast evaluates both Long Box and Short Box for a given strike pair (same expiry).
 // It emits signals when worst-case profit floor exceeds minProfitUSD and flatness gates pass.
-//
-//go:noinline
 func (e *BoxSpreadHFT) checkBoxFast(idx1, idx2 int, indexPrice float64) {
 	opt1 := &e.options[idx1]
 	opt2 := &e.options[idx2]
@@ -328,7 +319,7 @@ func (e *BoxSpreadHFT) checkBoxFast(idx1, idx2 int, indexPrice float64) {
 	hc := data.ReadDepthFast(int(hcIdx)) // C(K_high)
 	hp := data.ReadDepthFast(int(hpIdx)) // P(K_high)
 
-	// Sanity checks
+	// Basic sanity
 	if lc.AskPrice <= 0 || lp.AskPrice <= 0 || hc.AskPrice <= 0 || hp.AskPrice <= 0 {
 		return
 	}
@@ -339,7 +330,7 @@ func (e *BoxSpreadHFT) checkBoxFast(idx1, idx2 int, indexPrice float64) {
 		return
 	}
 
-	// Executable qty for LONG BOX pattern (+C_low@ask, +P_high@ask, -P_low@bid, -C_high@bid)
+	// Executable qty for LONG BOX (+C_low@ask, +P_high@ask, -P_low@bid, -C_high@bid)
 	Qlong := lc.AskQty
 	if hp.AskQty < Qlong {
 		Qlong = hp.AskQty
@@ -354,7 +345,7 @@ func (e *BoxSpreadHFT) checkBoxFast(idx1, idx2 int, indexPrice float64) {
 		Qlong = 0
 	}
 
-	// Executable qty for SHORT BOX pattern (+C_high@ask, +P_low@ask, -C_low@bid, -P_high@bid)
+	// Executable qty for SHORT BOX (+C_high@ask, +P_low@ask, -C_low@bid, -P_high@bid)
 	Qshort := hc.AskQty
 	if lp.AskQty < Qshort {
 		Qshort = lp.AskQty
@@ -382,7 +373,7 @@ func (e *BoxSpreadHFT) checkBoxFast(idx1, idx2 int, indexPrice float64) {
 		return
 	}
 
-	// Worst-case price band selection for S*
+	// Worst-case S* band
 	var Smin, Smax float64
 	if e.useBandCheck {
 		Smin, Smax = e.smin, e.smax
@@ -398,74 +389,75 @@ func (e *BoxSpreadHFT) checkBoxFast(idx1, idx2 int, indexPrice float64) {
 		Smin, Smax = indexPrice, indexPrice
 	}
 
-	// Fixed payoff component (USD per 1 qty)
+	// Fixed payoff (USD per 1 qty)
 	fixedUSD := (highStrike - lowStrike)
-
-	emit := func(side int8, q float64, profitFloorUSD float64) {
-		if q <= 0 {
-			return
-		}
-		if profitFloorUSD < e.minProfitUSD {
-			return
-		}
-		sig := BoxSignal{
-			LowCallIdx:   lcIdx,
-			LowPutIdx:    lpIdx,
-			HighCallIdx:  hcIdx,
-			HighPutIdx:   hpIdx,
-			LowStrike:    lowStrike,
-			HighStrike:   highStrike,
-			Profit:       profitFloorUSD,
-			UpdateTimeNs: data.Nanotime(),
-			Side:         side,
-		}
-		select {
-		case e.signals <- sig:
-		default:
-		}
-	}
 
 	// ===== LONG BOX =====
 	if Qlong > 0 {
-		// netBTC per total qty (sign drives worst-case S* and slope)
-		netBTC := (lc.AskPrice + hp.AskPrice - lp.BidPrice - hc.BidPrice) * Qlong
-		// slope := dPnL/dS per 1 qty = -netBTC/Q
-		slope := (-netBTC) / Qlong
-		if e.passFlatnessDirectional(slope) {
+		netBTCL := (lc.AskPrice + hp.AskPrice - lp.BidPrice - hc.BidPrice) * Qlong
+		slopeL := (-netBTCL) / Qlong // dPnL/dS per 1 qty
+		if e.passFlatnessDirectional(slopeL) {
 			Sstar := Smax
-			if netBTC < 0 {
+			if netBTCL < 0 {
 				Sstar = Smin
 			}
-			fees := (e.feePerLegUSD * 4.0 * Qlong)
+			fees := (e.feePerLegUSD * legsPerBox * Qlong)
 			if e.feePerLegRate > 0 {
-				fees += (e.feePerLegRate * Sstar * 4.0 * Qlong)
+				fees += (e.feePerLegRate * Sstar * legsPerBox * Qlong)
 			}
-			profitFloor := fixedUSD*Qlong - netBTC*Sstar - fees
+			profitFloor := fixedUSD*Qlong - netBTCL*Sstar - fees
 			if profitFloor >= e.minProfitUSD {
-				emit(BoxLong, Qlong, profitFloor)
+				// inline send (no closure)
+				sig := BoxSignal{
+					LowCallIdx:   lcIdx,
+					LowPutIdx:    lpIdx,
+					HighCallIdx:  hcIdx,
+					HighPutIdx:   hpIdx,
+					LowStrike:    lowStrike,
+					HighStrike:   highStrike,
+					Profit:       profitFloor,
+					UpdateTimeNs: data.Nanotime(),
+					Side:         BoxLong,
+				}
+				select {
+				case e.signals <- sig:
+				default:
+				}
 			}
 		}
 	}
 
 	// ===== SHORT BOX =====
 	if Qshort > 0 {
-		// netBTC per total qty
-		netBTC := (hc.AskPrice + lp.AskPrice - lc.BidPrice - hp.BidPrice) * Qshort
-		// slope := dPnL/dS per 1 qty = -netBTC/Q
-		slope := (-netBTC) / Qshort
-		if e.passFlatnessDirectional(slope) {
+		netBTCS := (hc.AskPrice + lp.AskPrice - lc.BidPrice - hp.BidPrice) * Qshort
+		slopeS := (-netBTCS) / Qshort // dPnL/dS per 1 qty
+		if e.passFlatnessDirectional(slopeS) {
 			Sstar := Smax
-			if netBTC < 0 {
+			if netBTCS < 0 {
 				Sstar = Smin
 			}
-			fees := (e.feePerLegUSD * 4.0 * Qshort)
+			fees := (e.feePerLegUSD * legsPerBox * Qshort)
 			if e.feePerLegRate > 0 {
-				fees += (e.feePerLegRate * Sstar * 4.0 * Qshort)
+				fees += (e.feePerLegRate * Sstar * legsPerBox * Qshort)
 			}
-			// For short box, fixed payoff sign is negative at expiry
-			profitFloor := -fixedUSD*Qshort - netBTC*Sstar - fees
+			profitFloor := -fixedUSD*Qshort - netBTCS*Sstar - fees
 			if profitFloor >= e.minProfitUSD {
-				emit(BoxShort, Qshort, profitFloor)
+				// inline send (no closure)
+				sig := BoxSignal{
+					LowCallIdx:   lcIdx,
+					LowPutIdx:    lpIdx,
+					HighCallIdx:  hcIdx,
+					HighPutIdx:   hpIdx,
+					LowStrike:    lowStrike,
+					HighStrike:   highStrike,
+					Profit:       profitFloor,
+					UpdateTimeNs: data.Nanotime(),
+					Side:         BoxShort,
+				}
+				select {
+				case e.signals <- sig:
+				default:
+				}
 			}
 		}
 	}
