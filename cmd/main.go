@@ -5,8 +5,9 @@ import (
 	"Options_Hedger/internal/auth"
 	"Options_Hedger/internal/data"
 	"Options_Hedger/internal/fix"
-	"Options_Hedger/internal/notify" // ← 권장 구조: 별도 패키지
-	"Options_Hedger/internal/strategy"
+	"Options_Hedger/internal/notify"   // notifier package
+	"Options_Hedger/internal/strategy" // strategies
+	"bufio"
 
 	"context"
 	"encoding/json"
@@ -36,7 +37,7 @@ func main() {
 		log.Println("[INFO] .env loaded successfully")
 	}
 
-	// HFT: 컨텍스트 스위칭 최소화
+	// HFT: reduce thread migrations
 	runtime.GOMAXPROCS(1)
 	runtime.LockOSThread()
 
@@ -49,12 +50,12 @@ func main() {
 
 	log.Printf("[INFO] Shared memory base pointer: 0x%x", data.SharedMemoryPtr())
 
-	// 초기 인덱스 가격
+	// Initial index price
 	btcPrice := fetchBTCPrice()
 	log.Printf("[INFO] BTC Price: %.2f", btcPrice)
 	data.SetIndexPrice(btcPrice)
 
-	// 인스트루먼트 조회 → 가장 가까운 만기(UTC 08:00) 선택 → 해당 만기에서 ATM±20% 필터
+	// Instruments → nearest expiry (UTC) → ATM ±20% symbols (balanced calls/puts)
 	instruments := fetchInstruments()
 	nearestLabel, expiryUTC := findNearestExpiryUTC(instruments)
 	options := filterOptionsByTS(instruments, expiryUTC, btcPrice)
@@ -63,18 +64,14 @@ func main() {
 	}
 	log.Printf("[INFO] Selected %d options from expiry %s", len(options), nearestLabel)
 
-	// FIX 구독 심볼 세팅
+	// Feed symbols to FIX
 	fix.SetOptionSymbols(options)
 
-	// 업데이트 채널 초기화 및 오더북 세팅
+	// Initialize order books and update channel
 	updateCh := make(chan data.Update, 2048)
 	data.InitOrderBooks(options, updateCh)
 
-	// 박스 스프레드 HFT 엔진
-	engine := strategy.NewBoxSpreadHFT(updateCh)
-	engine.InitializeHFT(options)
-
-	// 텔레그램 노티파이어 (환경변수 없으면 비활성)
+	// Notifier (optional)
 	var notifier notify.Notifier
 	if n, err := notify.NewTelegramFromEnv(); err != nil {
 		log.Printf("[NOTIFY] Telegram disabled: %v", err)
@@ -82,74 +79,120 @@ func main() {
 		notifier = n
 	}
 
-	// 엔진 실행
-	go engine.Run()
+	// 번호 선택/환경변수 기반 전략 선택
+	strategyName := chooseStrategy()
+	switch strategyName {
+	case "protective_collar", "collar":
+		pc := strategy.NewProtectiveCollar(updateCh)
+		pc.InitializeHFT(options)
+		pc.SetNotifier(notifier)
+		go pc.Run()
+		log.Printf("Protective collar started..")
 
-	// 신호 수신 → 텔레그램 전송 → 삑 → FIX 정리 → 종료
-	go func() {
-		for sig := range engine.Signals() {
-			lowCallSym := data.GetSymbolName(int32(sig.LowCallIdx))
-			lowPutSym := data.GetSymbolName(int32(sig.LowPutIdx))
-			highCallSym := data.GetSymbolName(int32(sig.HighCallIdx))
-			highPutSym := data.GetSymbolName(int32(sig.HighPutIdx))
+		// Signal consumer for Protective Collar
+		go func() {
+			for sig := range pc.Signals() {
+				putSym := data.GetSymbolName(int32(sig.PutIdx))
+				callSym := data.GetSymbolName(int32(sig.CallIdx))
 
-			// 최신 호가 & 인덱스 읽어 메시지 풍부화
-			lowCall := data.ReadDepthFast(int(sig.LowCallIdx))
-			lowPut := data.ReadDepthFast(int(sig.LowPutIdx))
-			highCall := data.ReadDepthFast(int(sig.HighCallIdx))
-			highPut := data.ReadDepthFast(int(sig.HighPutIdx))
-			idx := data.GetIndexPrice()
+				put := data.ReadDepthFast(int(sig.PutIdx))
+				call := data.ReadDepthFast(int(sig.CallIdx))
+				idx := data.GetIndexPrice()
 
-			msg := fmt.Sprintf(
-				"[BOX-SPREAD]\n"+
-					"strikes=%.0f→%.0f  index=%.2f  profit=$%.2f\n"+
-					"buyCallLo: %s  ask@%.4f (qty=%.4f)\n"+
-					"sellCallHi: %s  bid@%.4f (qty=%.4f)\n"+
-					"sellPutLo: %s  bid@%.4f (qty=%.4f)\n"+
-					"buyPutHi: %s  ask@%.4f (qty=%.4f)",
-				sig.LowStrike, sig.HighStrike, idx, sig.Profit,
-				lowCallSym, lowCall.AskPrice, lowCall.AskQty,
-				highCallSym, highCall.BidPrice, highCall.BidQty,
-				lowPutSym, lowPut.BidPrice, lowPut.BidQty,
-				highPutSym, highPut.AskPrice, highPut.AskQty,
-			)
+				msg := fmt.Sprintf(
+					"[PROTECTIVE-COLLAR]\n"+
+						"expiry=%d  index=%.2f  qty=%.4f  netCostUSD=%.2f\n"+
+						"buyPut : %s  ask@%.4f (qty=%.4f)\n"+
+						"sellCall: %s  bid@%.4f (qty=%.4f)",
+					sig.Expiry, idx, sig.Qty, sig.NetCostUSD,
+					putSym, put.AskPrice, put.AskQty,
+					callSym, call.BidPrice, call.BidQty,
+				)
 
-			log.Print(msg)
-
-			if notifier != nil {
-				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-				if err := notifier.Send(ctx, msg); err != nil {
-					log.Printf("[NOTIFY] telegram send failed: %v", err)
+				log.Print(msg)
+				if notifier != nil {
+					ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+					if err := notifier.Send(ctx, msg); err != nil {
+						log.Printf("[NOTIFY] telegram send failed: %v", err)
+					}
+					cancel()
 				}
-				cancel()
+				fmt.Print("\a") // beep
 			}
+		}()
 
-			// 삑
-			fmt.Print("\a")
+		// Periodic coarse-dedup reset
+		go func() {
+			ticker := time.NewTicker(100 * time.Millisecond)
+			defer ticker.Stop()
+			for range ticker.C {
+				pc.ResetSignalMask()
+			}
+		}()
 
-			// // FIX 종료 후 프로세스 종료 (defer는 os.Exit로 실행되지 않으니 직접 정리)
-			// fix.StopFIXEngine()
-			// time.Sleep(50 * time.Millisecond) // 소켓/로그 플러시 여유
-			// os.Exit(0)
-		}
-	}()
+	default: // "box_spread"
+		engine := strategy.NewBoxSpreadHFT(updateCh)
+		engine.InitializeHFT(options)
+		go engine.Run()
+		log.Printf("Box spread started..")
 
-	// 중복 신호 비트마스크 주기적 리셋
-	go func() {
-		ticker := time.NewTicker(100 * time.Millisecond)
-		defer ticker.Stop()
-		for range ticker.C {
-			engine.ResetSignalMask()
-		}
-	}()
+		// Signal consumer for Box Spread
+		go func() {
+			for sig := range engine.Signals() {
+				lowCallSym := data.GetSymbolName(int32(sig.LowCallIdx))
+				lowPutSym := data.GetSymbolName(int32(sig.LowPutIdx))
+				highCallSym := data.GetSymbolName(int32(sig.HighCallIdx))
+				highPutSym := data.GetSymbolName(int32(sig.HighPutIdx))
 
-	// FIX 시작
+				lowCall := data.ReadDepthFast(int(sig.LowCallIdx))
+				lowPut := data.ReadDepthFast(int(sig.LowPutIdx))
+				highCall := data.ReadDepthFast(int(sig.HighCallIdx))
+				highPut := data.ReadDepthFast(int(sig.HighPutIdx))
+				idx := data.GetIndexPrice()
+
+				msg := fmt.Sprintf(
+					"[BOX-SPREAD]\n"+
+						"strikes=%.0f→%.0f  index=%.2f  profit=$%.2f\n"+
+						"buyCallLo : %s  ask@%.4f (qty=%.4f)\n"+
+						"sellCallHi: %s  bid@%.4f (qty=%.4f)\n"+
+						"sellPutLo : %s  bid@%.4f (qty=%.4f)\n"+
+						"buyPutHi  : %s  ask@%.4f (qty=%.4f)",
+					sig.LowStrike, sig.HighStrike, idx, sig.Profit,
+					lowCallSym, lowCall.AskPrice, lowCall.AskQty,
+					highCallSym, highCall.BidPrice, highCall.BidQty,
+					lowPutSym, lowPut.BidPrice, lowPut.BidQty,
+					highPutSym, highPut.AskPrice, highPut.AskQty,
+				)
+
+				log.Print(msg)
+				if notifier != nil {
+					ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+					if err := notifier.Send(ctx, msg); err != nil {
+						log.Printf("[NOTIFY] telegram send failed: %v", err)
+					}
+					cancel()
+				}
+				fmt.Print("\a") // beep
+			}
+		}()
+
+		// Periodic coarse-dedup reset
+		go func() {
+			ticker := time.NewTicker(100 * time.Millisecond)
+			defer ticker.Stop()
+			for range ticker.C {
+				engine.ResetSignalMask()
+			}
+		}()
+	}
+
+	// Start FIX
 	if err := fix.InitFIXEngine("config/quickfix.cfg"); err != nil {
 		log.Printf("[FIX] Init failed: %v", err)
 	}
 	defer fix.StopFIXEngine()
 
-	// 외부 종료 시그널 대기
+	// Wait for shutdown signal
 	sigc := make(chan os.Signal, 1)
 	signal.Notify(sigc, syscall.SIGINT, syscall.SIGTERM)
 	<-sigc
@@ -157,6 +200,45 @@ func main() {
 }
 
 // ───────────────────────── helpers ─────────────────────────
+
+// 선택 메뉴 + 환경변수 지원
+// 우선순위: STRATEGY(문자) > STRATEGY_NUM(숫자) > 콘솔 입력(번호)
+func chooseStrategy() string {
+	// 1) STRATEGY (text)
+	if s := strings.ToLower(strings.TrimSpace(os.Getenv("STRATEGY"))); s != "" {
+		switch s {
+		case "1", "box_spread", "box", "boxspread":
+			return "box_spread"
+		case "2", "protective_collar", "collar", "protective":
+			return "protective_collar"
+		default:
+			log.Printf("[STRATEGY] unknown STRATEGY=%q -> default to box_spread", s)
+			return "box_spread"
+		}
+	}
+	// 2) STRATEGY_NUM (number)
+	if n := strings.TrimSpace(os.Getenv("STRATEGY_NUM")); n != "" {
+		if n == "2" {
+			return "protective_collar"
+		}
+		return "box_spread"
+	}
+	// 3) Interactive menu (번호 선택)
+	reader := bufio.NewReader(os.Stdin)
+	fmt.Println()
+	fmt.Println("전략을 선택하세요:")
+	fmt.Println("  1) Box Spread (HFT)")
+	fmt.Println("  2) Protective Collar")
+	fmt.Print("번호 입력 [기본=1]: ")
+	line, _ := reader.ReadString('\n')
+	line = strings.TrimSpace(line)
+	switch line {
+	case "2":
+		return "protective_collar"
+	default:
+		return "box_spread"
+	}
+}
 
 func fetchBTCPrice() float64 {
 	res, err := http.Get("https://www.deribit.com/api/v2/public/get_index_price?index_name=btc_usd")
@@ -201,7 +283,7 @@ func fetchInstruments() []Instrument {
 	return out
 }
 
-// UTC 기준 가장 가까운 미래 만기 선택 (서버 제공 expiration_timestamp 사용)
+// Choose nearest future expiry using expiration_timestamp (UTC)
 func findNearestExpiryUTC(instruments []Instrument) (label string, expiryUTC time.Time) {
 	nowUTC := time.Now().UTC()
 	var best time.Time
@@ -217,12 +299,10 @@ func findNearestExpiryUTC(instruments []Instrument) (label string, expiryUTC tim
 			continue
 		}
 		lbl := parts[1]
-
 		if seen[lbl] {
 			continue
 		}
 		seen[lbl] = true
-
 		if best.IsZero() || t.Before(best) {
 			best, label = t, lbl
 		}
@@ -232,7 +312,6 @@ func findNearestExpiryUTC(instruments []Instrument) (label string, expiryUTC tim
 		log.Fatal("[EXPIRY] no future expiries found (by timestamp)")
 	}
 
-	// 참고 로그
 	kst := time.FixedZone("KST", 9*3600)
 	log.Printf("[INFO] Nearest expiry: %s (UTC %s / KST %s)",
 		label,
@@ -242,7 +321,7 @@ func findNearestExpiryUTC(instruments []Instrument) (label string, expiryUTC tim
 	return label, best
 }
 
-// expiration_timestamp(UTC)로 정확하게 필터링 + ATM±20%
+// Exact expiry match by timestamp + select within ATM ±20%
 func filterOptionsByTS(instruments []Instrument, expiryUTC time.Time, atmPrice float64) []string {
 	type opt struct {
 		name     string
