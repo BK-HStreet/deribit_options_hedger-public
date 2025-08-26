@@ -12,12 +12,13 @@ import (
 )
 
 type hedgeHTTPMsg struct {
-	Seq     uint64  `json:"seq"`
-	Type    string  `json:"type"` // "SNAPSHOT" | "CLOSE_ALL"
-	Side    string  `json:"side"` // "LONG" | "SHORT" | "FLAT"
-	QtyBTC  float64 `json:"qty_btc"`
-	BaseUSD float64 `json:"base_usd"`
-	TsMs    int64   `json:"ts_ms"`
+	Seq      uint64  `json:"seq"`
+	Type     string  `json:"type"` // "SNAPSHOT" | "CLOSE_ALL"
+	Side     string  `json:"side"` // "LONG" | "SHORT" | "FLAT"
+	QtyBTC   float64 `json:"qty_btc"`
+	BaseUSD  float64 `json:"base_usd"`
+	IndexUSD float64 `json:"index_usd,omitempty"` // (선택) IndexFromTarget일 때 사용
+	TsMs     int64   `json:"ts_ms"`
 }
 
 func ServeHedgeHTTP(bc *strategy.BudgetedProtectiveCollar) {
@@ -40,6 +41,8 @@ func ServeHedgeHTTP(bc *strategy.BudgetedProtectiveCollar) {
 			http.Error(w, "bad json", http.StatusBadRequest)
 			return
 		}
+		log.Printf("[HEDGE-HTTP] recv seq=%d type=%s side=%s qty=%.8f base=%.2f idx=%.2f",
+			m.Seq, m.Type, m.Side, m.QtyBTC, m.BaseUSD, m.IndexUSD)
 
 		for {
 			prev := atomic.LoadUint64(&lastSeq)
@@ -63,13 +66,14 @@ func ServeHedgeHTTP(bc *strategy.BudgetedProtectiveCollar) {
 
 		switch strings.ToUpper(m.Type) {
 		case "CLOSE_ALL":
-			bc.SetTarget(strategy.HedgeTarget{Side: 0, QtyBTC: 0, BaseUSD: 0, Seq: m.Seq})
+			bc.SetTarget(strategy.HedgeTarget{Side: 0, QtyBTC: 0, BaseUSD: 0, IndexUSD: 0, Seq: m.Seq})
 		default:
 			bc.SetTarget(strategy.HedgeTarget{
-				Side:    side,
-				QtyBTC:  m.QtyBTC,
-				BaseUSD: m.BaseUSD,
-				Seq:     m.Seq,
+				Side:     side,
+				QtyBTC:   m.QtyBTC,
+				BaseUSD:  m.BaseUSD,
+				IndexUSD: m.IndexUSD, // IndexFromTarget 모드에서만 사용됨
+				Seq:      m.Seq,
 			})
 		}
 

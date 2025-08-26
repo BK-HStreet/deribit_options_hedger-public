@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -148,8 +149,41 @@ func StartEngine(kind Kind, updatesCh chan data.Update, symbols []string, ntf no
 		bc.InitializeHFT(symbols)
 		// 인덱스 소스 스위치: 기본(update) | shared | target
 		bc.SetIndexSource(parseIndexSource())
+		// (옵션) 테스트 타겟 ENV → HTTP가 아직 안 날아와도 바로 동작
+		if t, ok := parseTestTarget(os.Getenv("HEDGE_TEST_TARGET")); ok {
+			bc.SetTarget(t)
+			log.Printf("[TEST] HEDGE_TEST_TARGET applied: side=%d qty=%.8f base=%.2f", t.Side, t.QtyBTC, t.BaseUSD)
+		}
 		go bc.Run()
 		log.Printf("Budgeted protective collar started.. (index_src=%s)", os.Getenv("HEDGE_INDEX_SRC"))
+
+		// 테스트 타깃(ENV) 주입: 운용프로그램 POST 없이도 즉시 동작
+		if t, ok := parseTestTarget(os.Getenv("HEDGE_TEST_TARGET")); ok {
+			bc.SetTarget(t)
+			log.Printf("[TEST] HEDGE_TEST_TARGET applied: side=%d qty=%.8f base=%.2f", t.Side, t.QtyBTC, t.BaseUSD)
+		}
+
+		// 🔻 신호 소비/로그 출력 (없으면 신호가 드랍됨)
+		go func() {
+			for s := range bc.Signals() {
+				// 간결 로그(필요시 텔레그램 연동 가능)
+				if s.CloseAll {
+					log.Printf("[BUDGETED-COLLAR] CLOSE_ALL exp=%d S=%.2f", s.Expiry, s.IndexPrice)
+					continue
+				}
+				// sell leg
+				sell := s.SellLeg
+				log.Printf("[BUDGETED-COLLAR] side=%d exp=%d S=%.2f base=%.2f qty=%.4f  budget=%.2f spent=%.2f residual=%.2f\n",
+					"  SELL %s K=%.0f px=%.6f qty=%.4f\n  BUY_N=%d",
+					s.Side, s.Expiry, s.IndexPrice, s.BaseUSD, s.PlannedQty,
+					s.BudgetUSD, s.SpentUSD, s.ResidualUSD,
+					tern(sell.IsCall, "CALL", "PUT"), sell.Strike, sell.LimitPrice, sell.Qty,
+					s.BuyLegN,
+				)
+				// 필요하면 각 buy leg도 상세 로그
+				// for i:=0; i<s.BuyLegN; i { bl := s.BuyLegs[i]; ... }
+			}
+		}()
 
 		// 외부 타깃 수신 HTTP 서버 구동
 		servers.ServeHedgeHTTP(bc)
@@ -245,4 +279,32 @@ func parseIndexSource() strategy.IndexSource {
 	default:
 		return strategy.IndexFromUpdate
 	}
+}
+
+// HEDGE_TEST_TARGET 예: "LONG,0.2511,102580" 또는 "SHORT,0.15,95100"
+func parseTestTarget(s string) (strategy.HedgeTarget, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return strategy.HedgeTarget{}, false
+	}
+	parts := strings.Split(s, ",")
+	if len(parts) != 3 {
+		return strategy.HedgeTarget{}, false
+	}
+	sideStr := strings.ToUpper(strings.TrimSpace(parts[0]))
+	var side int8
+	switch sideStr {
+	case "LONG":
+		side = 1
+	case "SHORT":
+		side = -1
+	default:
+		return strategy.HedgeTarget{}, false
+	}
+	qty, err1 := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64)
+	base, err2 := strconv.ParseFloat(strings.TrimSpace(parts[2]), 64)
+	if err1 != nil || err2 != nil || qty <= 0 || base <= 0 {
+		return strategy.HedgeTarget{}, false
+	}
+	return strategy.HedgeTarget{Side: side, QtyBTC: qty, BaseUSD: base, Seq: 1}, true
 }
