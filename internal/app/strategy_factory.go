@@ -89,8 +89,10 @@ func StartEngine(kind Kind, updatesCh chan data.Update, symbols []string, ntf no
 	case KindBudgeted:
 		bc := strategy.NewBudgetedProtectiveCollar(updatesCh)
 		bc.InitializeHFT(symbols)
+		// 인덱스 소스 스위치: 기본(update) | shared | target
+		bc.SetIndexSource(parseIndexSource())
 		go bc.Run()
-		log.Printf("Budgeted protective collar started..")
+		log.Printf("Budgeted protective collar started.. (index_src=%s)", os.Getenv("HEDGE_INDEX_SRC"))
 
 		// 외부 타깃 수신 HTTP 서버 구동
 		servers.ServeHedgeHTTP(bc)
@@ -174,4 +176,16 @@ func tern(b bool, x, y string) string {
 		return x
 	}
 	return y
+}
+
+// HEDGE_INDEX_SRC: "", "update"(기본), "shared", "target"
+func parseIndexSource() strategy.IndexSource {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("HEDGE_INDEX_SRC"))) {
+	case "shared":
+		return strategy.IndexFromShared
+	case "target":
+		return strategy.IndexFromTarget
+	default:
+		return strategy.IndexFromUpdate
+	}
 }
