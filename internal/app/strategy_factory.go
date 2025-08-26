@@ -6,6 +6,7 @@ import (
 	"Options_Hedger/internal/notify"
 	"Options_Hedger/internal/servers"
 	"Options_Hedger/internal/strategy"
+	"bufio"
 	"context"
 	"fmt"
 	"log"
@@ -28,25 +29,81 @@ type Handle struct {
 }
 
 func ChooseStrategy() Kind {
+	// 1) 환경변수 우선
 	if s := strings.ToLower(strings.TrimSpace(os.Getenv("STRATEGY"))); s != "" {
 		switch s {
 		case "1", "box_spread", "box", "boxspread":
+			log.Printf("[STRATEGY] selected=%s (source=STRATEGY=%q)", kindName(KindBox), s)
 			return KindBox
 		case "2", "protective_collar", "collar", "protective":
+			log.Printf("[STRATEGY] selected=%s (source=STRATEGY=%q)", kindName(KindProtective), s)
 			return KindProtective
 		case "3", "budgeted_collar", "budget_collar", "budgeted":
+			log.Printf("[STRATEGY] selected=%s (source=STRATEGY=%q)", kindName(KindBudgeted), s)
 			return KindBudgeted
+		default:
+			log.Printf("[STRATEGY] unknown STRATEGY=%q → fallback", s)
 		}
 	}
 	if n := strings.TrimSpace(os.Getenv("STRATEGY_NUM")); n != "" {
 		switch n {
 		case "2":
+			log.Printf("[STRATEGY] selected=%s (source=STRATEGY_NUM=%q)", kindName(KindProtective), n)
 			return KindProtective
 		case "3":
+			log.Printf("[STRATEGY] selected=%s (source=STRATEGY_NUM=%q)", kindName(KindBudgeted), n)
 			return KindBudgeted
+		case "1":
+			log.Printf("[STRATEGY] selected=%s (source=STRATEGY_NUM=%q)", kindName(KindBox), n)
+			return KindBox
+		default:
+			log.Printf("[STRATEGY] unknown STRATEGY_NUM=%q → fallback", n)
 		}
 	}
+	// 2) 인터랙티브 폴백(터미널에서 실행 중일 때만)
+	if isInteractiveStdin() {
+		reader := bufio.NewReader(os.Stdin)
+		fmt.Println()
+		fmt.Println("전략을 선택하세요:")
+		fmt.Println("  1) Box Spread (HFT)")
+		fmt.Println("  2) Protective Collar")
+		fmt.Println("  3) Budgeted Protective Collar")
+		fmt.Print("번호 입력 [기본=1]: ")
+		line, _ := reader.ReadString('\n')
+		switch strings.TrimSpace(line) {
+		case "2":
+			log.Printf("[STRATEGY] selected=%s (interactive)", kindName(KindProtective))
+			return KindProtective
+		case "3":
+			log.Printf("[STRATEGY] selected=%s (interactive)", kindName(KindBudgeted))
+			return KindBudgeted
+		default:
+			log.Printf("[STRATEGY] selected=%s (interactive default)", kindName(KindBox))
+			return KindBox
+		}
+	}
+	// 3) 완전 무인 실행 시 기본값
+	log.Printf("[STRATEGY] selected=%s (default)", kindName(KindBox))
 	return KindBox
+}
+
+func isInteractiveStdin() bool {
+	fi, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return (fi.Mode() & os.ModeCharDevice) != 0
+}
+
+func kindName(k Kind) string {
+	switch k {
+	case KindProtective:
+		return "protective_collar"
+	case KindBudgeted:
+		return "budgeted_collar"
+	default:
+		return "box_spread"
+	}
 }
 
 func StartEngine(kind Kind, updatesCh chan data.Update, symbols []string, ntf notify.Notifier) *Handle {
