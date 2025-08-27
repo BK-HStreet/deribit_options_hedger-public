@@ -147,9 +147,8 @@ func StartEngine(kind Kind, updatesCh chan data.Update, symbols []string, ntf no
 	case KindBudgeted:
 		bc := strategy.NewBudgetedProtectiveCollar(updatesCh)
 		bc.InitializeHFT(symbols)
-		// 인덱스 소스 스위치: 기본(update) | shared | target
 		bc.SetIndexSource(parseIndexSource())
-		// (옵션) 테스트 타겟 ENV → HTTP가 아직 안 날아와도 바로 동작
+		// (옵션) 테스트 타깃 ENV → 운용프로그램 POST 없이 즉시 동작
 		if t, ok := parseTestTarget(os.Getenv("HEDGE_TEST_TARGET")); ok {
 			bc.SetTarget(t)
 			log.Printf("[TEST] HEDGE_TEST_TARGET applied: side=%d qty=%.8f base=%.2f", t.Side, t.QtyBTC, t.BaseUSD)
@@ -157,64 +156,35 @@ func StartEngine(kind Kind, updatesCh chan data.Update, symbols []string, ntf no
 		go bc.Run()
 		log.Printf("Budgeted protective collar started.. (index_src=%s)", os.Getenv("HEDGE_INDEX_SRC"))
 
-		// 테스트 타깃(ENV) 주입: 운용프로그램 POST 없이도 즉시 동작
-		if t, ok := parseTestTarget(os.Getenv("HEDGE_TEST_TARGET")); ok {
-			bc.SetTarget(t)
-			log.Printf("[TEST] HEDGE_TEST_TARGET applied: side=%d qty=%.8f base=%.2f", t.Side, t.QtyBTC, t.BaseUSD)
-		}
-
-		// 🔻 신호 소비/로그 출력 (없으면 신호가 드랍됨)
+		// 신호 소비/로그 (한 곳에서만 구독; 중복 구독 금지)
 		go func() {
 			for s := range bc.Signals() {
-				// 간결 로그(필요시 텔레그램 연동 가능)
 				if s.CloseAll {
 					log.Printf("[BUDGETED-COLLAR] CLOSE_ALL exp=%d S=%.2f", s.Expiry, s.IndexPrice)
 					continue
 				}
-				// sell leg
 				sell := s.SellLeg
-				log.Printf("[BUDGETED-COLLAR] side=%d exp=%d S=%.2f base=%.2f qty=%.4f  budget=%.2f spent=%.2f residual=%.2f\n",
-					"  SELL %s K=%.0f px=%.6f qty=%.4f\n  BUY_N=%d",
-					s.Side, s.Expiry, s.IndexPrice, s.BaseUSD, s.PlannedQty,
-					s.BudgetUSD, s.SpentUSD, s.ResidualUSD,
-					tern(sell.IsCall, "CALL", "PUT"), sell.Strike, sell.LimitPrice, sell.Qty,
-					s.BuyLegN,
+				sellType := "PUT"
+				if sell.IsCall {
+					sellType = "CALL"
+				}
+				log.Printf("[BUDGETED-COLLAR] SIDE=%s EXP=%d S=%.2f BASE=%.2f | SELL %s K=%.0f Q=%.6f",
+					map[int8]string{+1: "LONG_HEDGE", -1: "SHORT_HEDGE"}[s.Side],
+					s.Expiry, s.IndexPrice, s.BaseUSD, sellType, sell.Strike, sell.Qty,
 				)
-				// 필요하면 각 buy leg도 상세 로그
-				// for i:=0; i<s.BuyLegN; i { bl := s.BuyLegs[i]; ... }
+				for i := 0; i < s.BuyLegN; i++ {
+					bl := s.BuyLegs[i]
+					blType := "PUT"
+					if bl.IsCall {
+						blType = "CALL"
+					}
+					log.Printf("  BUY %s K=%.0f Q=%.6f", blType, bl.Strike, bl.Qty)
+				}
 			}
 		}()
 
-		// 외부 타깃 수신 HTTP 서버 구동
+		// 외부 타깃 수신 HTTP 서버
 		servers.ServeHedgeHTTP(bc)
-
-		go func() {
-			for sig := range bc.Signals() {
-				if sig.CloseAll {
-					log.Printf("[B-COLLAR] CloseAll exp=%d index=%.2f", sig.Expiry, sig.IndexPrice)
-					continue
-				}
-				var b strings.Builder
-				fmt.Fprintf(&b, "[B-COLLAR] side=%d qty=%.4f S=%.2f base=%.2f budget=%.2f spent=%.2f residual=%.2f\n",
-					sig.Side, sig.PlannedQty, sig.IndexPrice, sig.BaseUSD, sig.BudgetUSD, sig.SpentUSD, sig.ResidualUSD)
-				sell := sig.SellLeg
-				fmt.Fprintf(&b, "SELL %s idx=%d K=%.0f px=%.4f qty=%.4f\n",
-					tern(sell.IsCall, "CALL", "PUT"), sell.Idx, sell.Strike, sell.LimitPrice, sell.Qty)
-				for i := 0; i < sig.BuyLegN; i++ {
-					leg := sig.BuyLegs[i]
-					fmt.Fprintf(&b, "BUY  %s idx=%d K=%.0f px=%.4f qty=%.4f\n",
-						tern(leg.IsCall, "CALL", "PUT"), leg.Idx, leg.Strike, leg.LimitPrice, leg.Qty)
-				}
-				out := b.String()
-				log.Print(out)
-				if ntf != nil {
-					ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-					_ = ntf.Send(ctx, out)
-					cancel()
-				}
-				fmt.Print("\a")
-			}
-		}()
 
 		return &Handle{Name: "budgeted_collar", Stop: nil}
 
