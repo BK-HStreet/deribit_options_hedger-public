@@ -161,39 +161,73 @@ func StartEngine(kind Kind, updatesCh chan data.Update, symbols []string, ntf no
 		go bc.Run()
 		log.Printf("Budgeted protective collar started.. (index_src=%s)", os.Getenv("HEDGE_INDEX_SRC"))
 
-		// 단일 소비자: 로그 + 텔레그램
+		// 신호 소비: 로그 + 텔레그램 (5초 스로틀링, 최신 스냅샷 1건만 전송)
 		go func() {
-			for s := range bc.Signals() {
-				if s.CloseAll {
-					log.Printf("[BUDGETED-COLLAR] CLOSE_ALL exp=%d S=%.2f", s.Expiry, s.IndexPrice)
-					continue
-				}
-				var b strings.Builder
-				fmt.Fprintf(&b, "[BUDGETED-COLLAR] S=%.2f EXP=%d Q=%.6f\n", s.IndexPrice, s.Expiry, s.PlannedQty)
-				// SELL leg
-				sl := s.SellLeg
-				if sl.IsCall {
-					fmt.Fprintf(&b, "SELL CALL K=%.0f Q=%.6f\n", sl.Strike, sl.Qty)
-				} else {
-					fmt.Fprintf(&b, "SELL PUT  K=%.0f Q=%.6f\n", sl.Strike, sl.Qty)
-				}
-				// BUY legs
-				for i := 0; i < s.BuyLegN; i++ {
-					bl := s.BuyLegs[i]
-					if bl.IsCall {
-						fmt.Fprintf(&b, "BUY  CALL K=%.0f Q=%.6f\n", bl.Strike, bl.Qty)
+			ticker := time.NewTicker(5 * time.Second)
+			defer ticker.Stop()
+
+			var pending string
+			var hasPending bool
+
+			for {
+				select {
+				case s, ok := <-bc.Signals():
+					if !ok {
+						return
+					}
+					// 메시지 구성 (가장 최근 스냅샷만 보관)
+					if s.CloseAll {
+						// CloseAll은 즉시 전송 (긴급 알림)
+						msg := fmt.Sprintf("[BUDGETED-COLLAR] CLOSE_ALL exp=%d S=%.2f\n", s.Expiry, s.IndexPrice)
+						log.Print(msg)
+						if ntf != nil {
+							ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+							_ = ntf.Send(ctx, msg)
+							cancel()
+						}
+						fmt.Print("\a")
+						continue
+					}
+
+					var b strings.Builder
+					// 요약 헤더
+					fmt.Fprintf(&b, "[BUDGETED-COLLAR] S=%.2f EXP=%d Q=%.6f BASE=%.2f\n",
+						s.IndexPrice, s.Expiry, s.PlannedQty, s.BaseUSD)
+
+					// SELL leg (숏콜/숏풋)
+					sl := s.SellLeg
+					if sl.IsCall {
+						fmt.Fprintf(&b, "SELL CALL K=%.0f Q=%.6f\n", sl.Strike, sl.Qty)
 					} else {
-						fmt.Fprintf(&b, "BUY  PUT  K=%.0f Q=%.6f\n", bl.Strike, bl.Qty)
+						fmt.Fprintf(&b, "SELL PUT  K=%.0f Q=%.6f\n", sl.Strike, sl.Qty)
+					}
+
+					// BUY legs (롱풋/롱콜)
+					for i := 0; i < s.BuyLegN; i++ {
+						bl := s.BuyLegs[i]
+						if bl.IsCall {
+							fmt.Fprintf(&b, "BUY  CALL K=%.0f Q=%.6f\n", bl.Strike, bl.Qty)
+						} else {
+							fmt.Fprintf(&b, "BUY  PUT  K=%.0f Q=%.6f\n", bl.Strike, bl.Qty)
+						}
+					}
+
+					pending = b.String()
+					hasPending = true
+
+				case <-ticker.C:
+					if hasPending {
+						log.Print(pending)
+						if ntf != nil {
+							ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+							_ = ntf.Send(ctx, pending)
+							cancel()
+						}
+						fmt.Print("\a")
+						hasPending = false
+						pending = ""
 					}
 				}
-				msg := b.String()
-				log.Print(msg)
-				if ntf != nil {
-					ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-					_ = ntf.Send(ctx, msg)
-					cancel()
-				}
-				fmt.Print("\a")
 			}
 		}()
 
