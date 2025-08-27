@@ -156,32 +156,53 @@ func StartEngine(kind Kind, updatesCh chan data.Update, symbols []string, ntf no
 		go bc.Run()
 		log.Printf("Budgeted protective collar started.. (index_src=%s)", os.Getenv("HEDGE_INDEX_SRC"))
 
-		// 신호 소비/로그 (한 곳에서만 구독; 중복 구독 금지)
-		go func() {
+		// 신호 소비/로그 + 텔레그램 전송 (단일 구독자만 유지)
+		go func(ntf notify.Notifier) {
 			for s := range bc.Signals() {
+				// 메시지 빌드
+				var b strings.Builder
 				if s.CloseAll {
-					log.Printf("[BUDGETED-COLLAR] CLOSE_ALL exp=%d S=%.2f", s.Expiry, s.IndexPrice)
-					continue
-				}
-				sell := s.SellLeg
-				sellType := "PUT"
-				if sell.IsCall {
-					sellType = "CALL"
-				}
-				log.Printf("[BUDGETED-COLLAR] SIDE=%s EXP=%d S=%.2f BASE=%.2f | SELL %s K=%.0f Q=%.6f",
-					map[int8]string{+1: "LONG_HEDGE", -1: "SHORT_HEDGE"}[s.Side],
-					s.Expiry, s.IndexPrice, s.BaseUSD, sellType, sell.Strike, sell.Qty,
-				)
-				for i := 0; i < s.BuyLegN; i++ {
-					bl := s.BuyLegs[i]
-					blType := "PUT"
-					if bl.IsCall {
-						blType = "CALL"
+					fmt.Fprintf(&b, "[BUDGETED-COLLAR] CLOSE_ALL exp=%d S=%.2f\n", s.Expiry, s.IndexPrice)
+				} else {
+					sideStr := map[int8]string{+1: "LONG_HEDGE", -1: "SHORT_HEDGE"}[s.Side]
+					fmt.Fprintf(&b, "[BUDGETED-COLLAR] SIDE=%s EXP=%d S=%.2f BASE=%.2f Q=%.6f\n",
+						sideStr, s.Expiry, s.IndexPrice, s.BaseUSD, s.PlannedQty)
+
+					// SELL 레그 (가까운 OTM에서 매도)
+					sell := s.SellLeg
+					sellType := "PUT"
+					if sell.IsCall {
+						sellType = "CALL"
 					}
-					log.Printf("  BUY %s K=%.0f Q=%.6f", blType, bl.Strike, bl.Qty)
+					fmt.Fprintf(&b, "SELL %s K=%.0f Q=%.6f\n", sellType, sell.Strike, sell.Qty)
+
+					// BUY 레그들 (가까운 OTM부터 Greedy)
+					for i := 0; i < s.BuyLegN; i++ {
+						bl := s.BuyLegs[i]
+						blType := "PUT"
+						if bl.IsCall {
+							blType = "CALL"
+						}
+						fmt.Fprintf(&b, "BUY  %s K=%.0f Q=%.6f\n", blType, bl.Strike, bl.Qty)
+					}
+					// (원한다면) 예산/잔액도 덧붙일 수 있음
+					// fmt.Fprintf(&b, "BUDGET=%.2f SPENT=%.2f RESIDUAL=%.2f\n", s.BudgetUSD, s.SpentUSD, s.ResidualUSD)
 				}
+
+				msg := b.String()
+				log.Print(msg)
+
+				// 텔레그램 전송
+				if ntf != nil && msg != "" {
+					ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+					_ = ntf.Send(ctx, msg) // 에러는 로그만
+					cancel()
+				}
+
+				// beep
+				fmt.Print("\a")
 			}
-		}()
+		}(ntf)
 
 		// 외부 타깃 수신 HTTP 서버
 		servers.ServeHedgeHTTP(bc)
