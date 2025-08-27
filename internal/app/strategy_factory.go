@@ -46,22 +46,23 @@ func ChooseStrategy() Kind {
 			log.Printf("[STRATEGY] unknown STRATEGY=%q → fallback", s)
 		}
 	}
+	// 2) 숫자 환경변수
 	if n := strings.TrimSpace(os.Getenv("STRATEGY_NUM")); n != "" {
 		switch n {
+		case "1":
+			log.Printf("[STRATEGY] selected=%s (source=STRATEGY_NUM=%q)", kindName(KindBox), n)
+			return KindBox
 		case "2":
 			log.Printf("[STRATEGY] selected=%s (source=STRATEGY_NUM=%q)", kindName(KindProtective), n)
 			return KindProtective
 		case "3":
 			log.Printf("[STRATEGY] selected=%s (source=STRATEGY_NUM=%q)", kindName(KindBudgeted), n)
 			return KindBudgeted
-		case "1":
-			log.Printf("[STRATEGY] selected=%s (source=STRATEGY_NUM=%q)", kindName(KindBox), n)
-			return KindBox
 		default:
 			log.Printf("[STRATEGY] unknown STRATEGY_NUM=%q → fallback", n)
 		}
 	}
-	// 2) 인터랙티브 폴백(터미널에서 실행 중일 때만)
+	// 3) 인터랙티브 폴백
 	if isInteractiveStdin() {
 		reader := bufio.NewReader(os.Stdin)
 		fmt.Println()
@@ -83,7 +84,7 @@ func ChooseStrategy() Kind {
 			return KindBox
 		}
 	}
-	// 3) 완전 무인 실행 시 기본값
+	// 4) 완전 무인 기본값
 	log.Printf("[STRATEGY] selected=%s (default)", kindName(KindBox))
 	return KindBox
 }
@@ -116,6 +117,7 @@ func StartEngine(kind Kind, updatesCh chan data.Update, symbols []string, ntf no
 		go pc.Run()
 		log.Printf("Protective collar started..")
 
+		// 단일 소비자: 로그 + 텔레그램
 		go func() {
 			for sig := range pc.Signals() {
 				putSym := data.GetSymbolName(int32(sig.PutIdx))
@@ -123,6 +125,7 @@ func StartEngine(kind Kind, updatesCh chan data.Update, symbols []string, ntf no
 				put := data.ReadDepthFast(int(sig.PutIdx))
 				call := data.ReadDepthFast(int(sig.CallIdx))
 				idx := data.GetIndexPrice()
+
 				msg := fmt.Sprintf(
 					"[PROTECTIVE-COLLAR]\n"+
 						"expiry=%d  index=%.2f  qty=%.4f  netCostUSD=%.2f\n"+
@@ -147,66 +150,58 @@ func StartEngine(kind Kind, updatesCh chan data.Update, symbols []string, ntf no
 	case KindBudgeted:
 		bc := strategy.NewBudgetedProtectiveCollar(updatesCh)
 		bc.InitializeHFT(symbols)
-		bc.SetIndexSource(parseIndexSource())
-		// (옵션) 테스트 타깃 ENV → 운용프로그램 POST 없이 즉시 동작
+		bc.SetIndexSource(parseIndexSource()) // update/shared/target
+		bc.EnableDebugFromEnv()
+		// 테스트 타깃(있으면) 1회 주입
 		if t, ok := parseTestTarget(os.Getenv("HEDGE_TEST_TARGET")); ok {
 			bc.SetTarget(t)
-			log.Printf("[TEST] HEDGE_TEST_TARGET applied: side=%d qty=%.8f base=%.2f", t.Side, t.QtyBTC, t.BaseUSD)
+			log.Printf("[TEST] HEDGE_TEST_TARGET applied: side=%d qty=%.8f base=%.2f",
+				t.Side, t.QtyBTC, t.BaseUSD)
 		}
 		go bc.Run()
 		log.Printf("Budgeted protective collar started.. (index_src=%s)", os.Getenv("HEDGE_INDEX_SRC"))
 
-		// 신호 소비/로그 + 텔레그램 전송 (단일 구독자만 유지)
-		go func(ntf notify.Notifier) {
+		// 단일 소비자: 로그 + 텔레그램
+		go func() {
 			for s := range bc.Signals() {
-				// 메시지 빌드
-				var b strings.Builder
 				if s.CloseAll {
-					fmt.Fprintf(&b, "[BUDGETED-COLLAR] CLOSE_ALL exp=%d S=%.2f\n", s.Expiry, s.IndexPrice)
-				} else {
-					sideStr := map[int8]string{+1: "LONG_HEDGE", -1: "SHORT_HEDGE"}[s.Side]
-					fmt.Fprintf(&b, "[BUDGETED-COLLAR] SIDE=%s EXP=%d S=%.2f BASE=%.2f Q=%.6f\n",
-						sideStr, s.Expiry, s.IndexPrice, s.BaseUSD, s.PlannedQty)
-
-					// SELL 레그 (가까운 OTM에서 매도)
-					sell := s.SellLeg
-					sellType := "PUT"
-					if sell.IsCall {
-						sellType = "CALL"
-					}
-					fmt.Fprintf(&b, "SELL %s K=%.0f Q=%.6f\n", sellType, sell.Strike, sell.Qty)
-
-					// BUY 레그들 (가까운 OTM부터 Greedy)
-					for i := 0; i < s.BuyLegN; i++ {
-						bl := s.BuyLegs[i]
-						blType := "PUT"
-						if bl.IsCall {
-							blType = "CALL"
-						}
-						fmt.Fprintf(&b, "BUY  %s K=%.0f Q=%.6f\n", blType, bl.Strike, bl.Qty)
-					}
-					// (원한다면) 예산/잔액도 덧붙일 수 있음
-					// fmt.Fprintf(&b, "BUDGET=%.2f SPENT=%.2f RESIDUAL=%.2f\n", s.BudgetUSD, s.SpentUSD, s.ResidualUSD)
+					log.Printf("[BUDGETED-COLLAR] CLOSE_ALL exp=%d S=%.2f", s.Expiry, s.IndexPrice)
+					continue
 				}
-
+				var b strings.Builder
+				fmt.Fprintf(&b, "[BUDGETED-COLLAR] S=%.2f EXP=%d Q=%.6f\n", s.IndexPrice, s.Expiry, s.PlannedQty)
+				// SELL leg
+				sl := s.SellLeg
+				if sl.IsCall {
+					fmt.Fprintf(&b, "SELL CALL K=%.0f Q=%.6f\n", sl.Strike, sl.Qty)
+				} else {
+					fmt.Fprintf(&b, "SELL PUT  K=%.0f Q=%.6f\n", sl.Strike, sl.Qty)
+				}
+				// BUY legs
+				for i := 0; i < s.BuyLegN; i++ {
+					bl := s.BuyLegs[i]
+					if bl.IsCall {
+						fmt.Fprintf(&b, "BUY  CALL K=%.0f Q=%.6f\n", bl.Strike, bl.Qty)
+					} else {
+						fmt.Fprintf(&b, "BUY  PUT  K=%.0f Q=%.6f\n", bl.Strike, bl.Qty)
+					}
+				}
 				msg := b.String()
 				log.Print(msg)
-
-				// 텔레그램 전송
-				if ntf != nil && msg != "" {
+				if ntf != nil {
 					ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-					_ = ntf.Send(ctx, msg) // 에러는 로그만
+					_ = ntf.Send(ctx, msg)
 					cancel()
 				}
-
-				// beep
 				fmt.Print("\a")
 			}
-		}(ntf)
+		}()
 
-		// 외부 타깃 수신 HTTP 서버
+		// FIX 틱 없어도 즉시 1회 산출
+		bc.Kick()
+
+		// 외부 타깃 수신 (미사용이어도 저비용)
 		servers.ServeHedgeHTTP(bc)
-
 		return &Handle{Name: "budgeted_collar", Stop: nil}
 
 	default: // KindBox
@@ -215,6 +210,7 @@ func StartEngine(kind Kind, updatesCh chan data.Update, symbols []string, ntf no
 		go eng.Run()
 		log.Printf("Box spread started..")
 
+		// 단일 소비자: 로그 + 텔레그램
 		go func() {
 			for sig := range eng.Signals() {
 				lowCallSym := data.GetSymbolName(int32(sig.LowCallIdx))
@@ -226,6 +222,7 @@ func StartEngine(kind Kind, updatesCh chan data.Update, symbols []string, ntf no
 				highCall := data.ReadDepthFast(int(sig.HighCallIdx))
 				highPut := data.ReadDepthFast(int(sig.HighPutIdx))
 				idx := data.GetIndexPrice()
+
 				msg := fmt.Sprintf(
 					"[BOX-SPREAD]\n"+
 						"strikes=%.0f→%.0f  index=%.2f  profit=$%.2f\n"+
@@ -251,13 +248,6 @@ func StartEngine(kind Kind, updatesCh chan data.Update, symbols []string, ntf no
 
 		return &Handle{Name: "box_spread", Stop: nil}
 	}
-}
-
-func tern(b bool, x, y string) string {
-	if b {
-		return x
-	}
-	return y
 }
 
 // HEDGE_INDEX_SRC: "", "update"(기본), "shared", "target"
