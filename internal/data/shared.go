@@ -39,19 +39,16 @@ type Update struct {
 
 var shared = &SharedBook{}
 
-//go:noinline
 func SetIndexPrice(v float64) {
 	now := Nanotime()
 	atomic.StoreUint64((*uint64)(unsafe.Pointer(&shared.IndexPrice)), math.Float64bits(v))
 	atomic.StoreInt64(&shared.LastUpdateNs, now)
 }
 
-//go:noinline
 func GetIndexPrice() float64 {
 	return math.Float64frombits(atomic.LoadUint64((*uint64)(unsafe.Pointer(&shared.IndexPrice))))
 }
 
-//go:noinline
 func WriteDepthFast(idx int, bid, bidQty, ask, askQty float64) {
 	entry := &shared.Books[idx]
 	now := Nanotime()
@@ -64,7 +61,6 @@ func WriteDepthFast(idx int, bid, bidQty, ask, askQty float64) {
 	atomic.StoreInt64(&entry.LastUpdateNs, now)
 }
 
-//go:noinline
 func ReadDepthFast(idx int) DepthEntry {
 	entry := &shared.Books[idx]
 	return DepthEntry{

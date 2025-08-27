@@ -120,7 +120,7 @@ func (App) ToAdmin(msg *quickfix.Message, id quickfix.SessionID) {
 		msg.Body.SetField(quickfix.Tag(96), quickfix.FIXString(rawData))
 		msg.Body.SetField(quickfix.Tag(553), quickfix.FIXString(clientID))
 		msg.Body.SetField(quickfix.Tag(554), quickfix.FIXString(password))
-		log.Println("[FIX-SEND]", msg.String())
+		// log.Println("[FIX-SEND]", msg.String())
 	}
 }
 
@@ -240,8 +240,6 @@ func parseIndexPriceFast(msg *quickfix.Message) float64 {
 }
 
 // ✅ HFT 최적화된 FIX 파싱 (메시지 타입별 최적화)
-//
-//go:noinline
 func fastParseHFT(msg *quickfix.Message, msgType string) (string, float64, float64, float64, float64, bool, bool) {
 	var sym string
 	var bestBid, bestAsk, bidQty, askQty float64
@@ -351,12 +349,6 @@ func fastParseHFT(msg *quickfix.Message, msgType string) (string, float64, float
 			askQty = asks[bestIdx].Qty
 		}
 
-		// 디버깅용 로그
-		if strings.Contains(sym, "117000-C") {
-			log.Printf("[SNAPSHOT-DEBUG] Sym=%s BidLevels=%d AskLevels=%d BestBid=%.4f(%.1f) BestAsk=%.4f(%.1f)",
-				sym, bidCount, askCount, bestBid, bidQty, bestAsk, askQty)
-		}
-
 	case "X": // Incremental - 직접 업데이트 처리
 		for i := 0; i < group.Len() && i < 8; i++ { // Incremental은 보통 적음
 			entry := group.Get(i)
@@ -407,11 +399,6 @@ func fastParseHFT(msg *quickfix.Message, msgType string) (string, float64, float
 				}
 			}
 		}
-
-		// // 디버깅용 로그
-		// log.Printf("[INCREMENTAL-DEBUG] Sym=%s Bid=%.4f(%.1f) Ask=%.4f(%.1f) DelBid=%v DelAsk=%v",
-		// 	sym, bestBid, bidQty, bestAsk, askQty, delBid, delAsk)
-
 	}
 
 	return sym, bestBid, bestAsk, bidQty, askQty, delBid, delAsk
