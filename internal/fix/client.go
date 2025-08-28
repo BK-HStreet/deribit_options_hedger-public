@@ -42,7 +42,6 @@ func SetOptionSymbols(symbols []string) {
 	}
 }
 
-//go:noinline
 func getSymbolIndex(symbol string) int32 {
 	if idx, ok := symbolToIndex[symbol]; ok {
 		return idx
@@ -55,7 +54,7 @@ func (App) OnCreate(id quickfix.SessionID) {}
 func (App) OnLogon(id quickfix.SessionID) {
 	log.Println("[FIX] >>>> OnLogon received from server!")
 
-	// ✅ MarketDataRequest 생성
+	// MarketDataRequest
 	mdReq := marketdatarequest.New(
 		field.NewMDReqID("BTC_OPTIONS"),
 		field.NewSubscriptionRequestType(enum.SubscriptionRequestType_SNAPSHOT_PLUS_UPDATES),
@@ -64,7 +63,7 @@ func (App) OnLogon(id quickfix.SessionID) {
 	mdReq.Set(field.NewMDUpdateType(enum.MDUpdateType_INCREMENTAL_REFRESH))
 	mdReq.Set(field.NewAggregatedBook(true))
 
-	// ✅ MDEntryTypes (Bid + Offer)
+	// MDEntryTypes (Bid + Offer)
 	mdEntryGroup := marketdatarequest.NewNoMDEntryTypesRepeatingGroup()
 	bidEntry := mdEntryGroup.Add()
 	bidEntry.Set(field.NewMDEntryType(enum.MDEntryType_BID))
@@ -72,19 +71,19 @@ func (App) OnLogon(id quickfix.SessionID) {
 	askEntry.Set(field.NewMDEntryType(enum.MDEntryType_OFFER))
 	mdReq.SetGroup(mdEntryGroup)
 
-	// ✅ 옵션 심볼 + BTC Index 추가
+	// Options Symbol + BTC Index
 	symGroup := marketdatarequest.NewNoRelatedSymRepeatingGroup()
 	for _, sym := range optionSymbols {
 		entry := symGroup.Add()
 		entry.Set(field.NewSymbol(sym))
 	}
 
-	// ✅ BTC-USD Index 심볼 추가 (IndexPrice 수신)
+	// Adding BTC-USD Index Symbol (Index Price)
 	idxEntry := symGroup.Add()
 	idxEntry.Set(field.NewSymbol("BTC-DERIBIT-INDEX"))
 	mdReq.SetGroup(symGroup)
 
-	// ✅ 요청 전송
+	// Sending Request
 	if err := quickfix.SendToTarget(mdReq, id); err != nil {
 		log.Println("[FIX] MarketDataRequest send error:", err)
 	} else {
@@ -134,7 +133,6 @@ type PriceLevel struct {
 	Qty   float64
 }
 
-//go:noinline
 func (app *App) FromApp(msg *quickfix.Message, id quickfix.SessionID) quickfix.MessageRejectError {
 	msgType, _ := msg.Header.GetString(quickfix.Tag(35))
 
@@ -147,7 +145,7 @@ func (app *App) FromApp(msg *quickfix.Message, id quickfix.SessionID) quickfix.M
 	var idxPrice float64
 	foundIndex := false
 
-	// ✅ Tag 810 (UnderlyingPx) 확인
+	// Tag 810 (UnderlyingPx) 확인
 	var idxField quickfix.FIXFloat
 	if err := msg.Body.GetField(810, &idxField); err == nil {
 		idxPrice = float64(idxField)
@@ -155,10 +153,10 @@ func (app *App) FromApp(msg *quickfix.Message, id quickfix.SessionID) quickfix.M
 		foundIndex = true
 	}
 
-	// ✅ MsgType W or X 에서 Tag 269=3 처리 (HFT 최적화 버전)
+	// MsgType W or X 에서 Tag 269=3 처리 (HFT 최적화 버전)
 	if msgType == "W" || msgType == "X" {
 		if !foundIndex {
-			// ✅ 인덱스 가격 빠른 파싱
+			// 인덱스 가격 빠른 파싱
 			idxPrice = parseIndexPriceFast(msg)
 			if idxPrice > 0 {
 				data.SetIndexPrice(idxPrice)
@@ -166,7 +164,7 @@ func (app *App) FromApp(msg *quickfix.Message, id quickfix.SessionID) quickfix.M
 			}
 		}
 
-		// ✅ Bid/Ask 처리 (HFT 최적화)
+		// Bid/Ask 처리 (HFT 최적화)
 		sym, bid, ask, bidQty, askQty, delBid, delAsk := fastParseHFT(msg, msgType)
 
 		// Index 심볼은 무시 (빠른 문자열 비교)
@@ -177,7 +175,7 @@ func (app *App) FromApp(msg *quickfix.Message, id quickfix.SessionID) quickfix.M
 		if sym != "" {
 			symbolIdx := getSymbolIndex(sym)
 			if symbolIdx >= 0 {
-				// ✅ HFT 최적화된 업데이트 함수 사용
+				// HFT 최적화된 업데이트 함수 사용
 				if !foundIndex {
 					idxPrice = data.GetIndexPrice()
 				}
@@ -195,11 +193,9 @@ func (app *App) FromApp(msg *quickfix.Message, id quickfix.SessionID) quickfix.M
 	return nil
 }
 
-// ✅ HFT 최적화: 인덱스 가격만 빠르게 파싱
-//
-//go:noinline
+// HFT 최적화: 인덱스 가격만 빠르게 파싱
 func parseIndexPriceFast(msg *quickfix.Message) float64 {
-	// ✅ 먼저 심볼 확인
+	// 먼저 심볼 확인
 	var symField quickfix.FIXString
 	if err := msg.Body.GetField(55, &symField); err != nil {
 		return 0
@@ -210,7 +206,7 @@ func parseIndexPriceFast(msg *quickfix.Message) float64 {
 		return 0
 	}
 
-	// ✅ 간단한 그룹 템플릿으로 빠른 파싱
+	// 간단한 그룹 템플릿으로 빠른 파싱
 	group := quickfix.NewRepeatingGroup(268,
 		quickfix.GroupTemplate{
 			quickfix.GroupElement(279), // MDUpdateAction (X 메시지에 있음)

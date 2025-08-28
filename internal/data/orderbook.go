@@ -25,7 +25,6 @@ func InitOrderBooks(syms []string, ch chan Update) {
 	symbolCount = int32(count)
 }
 
-//go:noinline
 func ApplyUpdateFast(symbolIdx int32, isBid bool, price, qty, idxPrice float64) {
 	if symbolIdx < 0 || symbolIdx >= symbolCount {
 		return

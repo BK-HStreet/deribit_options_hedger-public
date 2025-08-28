@@ -27,7 +27,7 @@ type DepthEntry struct {
 	_            [cacheLine - 40]byte // 패딩
 }
 
-// ✅ 업데이트 정보 - 스택 할당 최적화
+// 업데이트 정보 - 스택 할당 최적화
 type Update struct {
 	SymbolIdx  int32 // 인덱스로 심볼 식별
 	IsBid      bool
