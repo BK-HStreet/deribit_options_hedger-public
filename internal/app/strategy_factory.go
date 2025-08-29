@@ -152,16 +152,17 @@ func StartEngine(kind Kind, updatesCh chan data.Update, symbols []string, ntf no
 		bc.InitializeHFT(symbols)
 		bc.SetIndexSource(parseIndexSource()) // update/shared/target
 		bc.EnableDebugFromEnv()
-		// 테스트 타깃(있으면) 1회 주입
+
 		if t, ok := parseTestTarget(os.Getenv("HEDGE_TEST_TARGET")); ok {
 			bc.SetTarget(t)
 			log.Printf("[TEST] HEDGE_TEST_TARGET applied: side=%d qty=%.8f base=%.2f",
 				t.Side, t.QtyBTC, t.BaseUSD)
 		}
+
 		go bc.Run()
 		log.Printf("Budgeted protective collar started.. (index_src=%s)", os.Getenv("HEDGE_INDEX_SRC"))
 
-		// 신호 소비: 로그 + 텔레그램 (5초 스로틀링, 최신 스냅샷 1건만 전송)
+		// ── 신호 소비자(5초 스로틀링, 최신 1건 유지) ───────────────────────────
 		go func() {
 			ticker := time.NewTicker(5 * time.Second)
 			defer ticker.Stop()
@@ -169,15 +170,29 @@ func StartEngine(kind Kind, updatesCh chan data.Update, symbols []string, ntf no
 			var pending string
 			var hasPending bool
 
+			// 소형 포맷 함수(alloc 최소화)
+			writeLeg := func(b *strings.Builder, prefix string, isCall bool, K, Q float64) {
+				if isCall {
+					// SELL CALL 또는 BUY  CALL
+					b.WriteString(prefix)
+					b.WriteString("CALL K=")
+				} else {
+					// SELL PUT  또는 BUY  PUT
+					b.WriteString(prefix)
+					b.WriteString("PUT  K=")
+				}
+				fmt.Fprintf(b, "%.0f Q=%.6f\n", K, Q)
+			}
+
 			for {
 				select {
 				case s, ok := <-bc.Signals():
 					if !ok {
 						return
 					}
-					// 메시지 구성 (가장 최근 스냅샷만 보관)
+
+					// CLOSE_ALL은 즉시 전달(긴급)
 					if s.CloseAll {
-						// CloseAll은 즉시 전송 (긴급 알림)
 						msg := fmt.Sprintf("[BUDGETED-COLLAR] CLOSE_ALL exp=%d S=%.2f\n", s.Expiry, s.IndexPrice)
 						log.Print(msg)
 						if ntf != nil {
@@ -189,29 +204,32 @@ func StartEngine(kind Kind, updatesCh chan data.Update, symbols []string, ntf no
 						continue
 					}
 
+					// 최신 신호를 builder로 구성
 					var b strings.Builder
-					// 요약 헤더
+					// 헤더(요약)
 					fmt.Fprintf(&b, "[BUDGETED-COLLAR] S=%.2f EXP=%d Q=%.6f BASE=%.2f\n",
 						s.IndexPrice, s.Expiry, s.PlannedQty, s.BaseUSD)
 
-					// SELL leg (숏콜/숏풋)
-					sl := s.SellLeg
-					if sl.IsCall {
-						fmt.Fprintf(&b, "SELL CALL K=%.0f Q=%.6f\n", sl.Strike, sl.Qty)
-					} else {
-						fmt.Fprintf(&b, "SELL PUT  K=%.0f Q=%.6f\n", sl.Strike, sl.Qty)
+					// SELL leg(있을 때만)
+					if s.SellLeg.Qty > 0 {
+						writeLeg(&b, "SELL ", s.SellLeg.IsCall, s.SellLeg.Strike, s.SellLeg.Qty)
 					}
 
-					// BUY legs (롱풋/롱콜)
+					// BUY legs N개(0이면 출력 안 함)
 					for i := 0; i < s.BuyLegN; i++ {
 						bl := s.BuyLegs[i]
-						if bl.IsCall {
-							fmt.Fprintf(&b, "BUY  CALL K=%.0f Q=%.6f\n", bl.Strike, bl.Qty)
-						} else {
-							fmt.Fprintf(&b, "BUY  PUT  K=%.0f Q=%.6f\n", bl.Strike, bl.Qty)
-						}
+						writeLeg(&b, "BUY  ", bl.IsCall, bl.Strike, bl.Qty)
 					}
 
+					// 이유/비고가 있으면 항상 1줄 추가 (최소수량 미만 등)
+					if s.Note != "" {
+						// 한 줄짜리, HFT 부담 없도록 그대로 write
+						b.WriteString("NOTE: ")
+						b.WriteString(s.Note)
+						b.WriteByte('\n')
+					}
+
+					// 5초 동안 최신 1건만 유지
 					pending = b.String()
 					hasPending = true
 
@@ -231,10 +249,9 @@ func StartEngine(kind Kind, updatesCh chan data.Update, symbols []string, ntf no
 			}
 		}()
 
-		// FIX 틱 없어도 즉시 1회 산출
+		// 초기 1회 산출(없어도 되지만, 모니터링 빨리 시작하고 싶으면 유지)
 		bc.Kick()
 
-		// 외부 타깃 수신 (미사용이어도 저비용)
 		servers.ServeHedgeHTTP(bc)
 		return &Handle{Name: "budgeted_collar", Stop: nil}
 
