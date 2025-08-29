@@ -1,0 +1,37 @@
+run:
+  timeout: 5m
+
+linters-settings:
+  nolintlint:
+    # Enable to require an explanation of nonzero length after each nolint directive.
+    # Default: false
+    require-explanation: true
+    # Enable to require nolint directives to mention the specific linter being suppressed.
+    # Default: false
+    require-specific: true
+
+linters:
+  enable:
+    - nolintlint
+    - errcheck
+    - gosimple
+    - goimports
+    - govet
+    - ineffassign
+    - gosec
+    - misspell
+    - stylecheck
+    - revive
+    - predeclared
+    - staticcheck
+    - typecheck
+    - unused
+
+issues:
+  exclude-rules:
+    - path: "_test.go"
+      linters:
+        - govet
+        - gosec
+        - staticcheck
+        - unused
