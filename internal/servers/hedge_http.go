@@ -34,7 +34,7 @@ func ServeHedgeHTTP(bc *strategy.BudgetedProtectiveCollar) {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // ← 추가 (최대 1MB)
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 		defer r.Body.Close()
 
 		var m hedgeHTTPMsg
@@ -77,6 +77,7 @@ func ServeHedgeHTTP(bc *strategy.BudgetedProtectiveCollar) {
 				IndexUSD: m.IndexUSD, // IndexFromTarget 모드에서만 사용됨
 				Seq:      m.Seq,
 			})
+			bc.Wake()
 		}
 
 		w.Header().Set("Content-Type", "application/json")

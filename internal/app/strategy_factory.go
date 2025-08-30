@@ -249,9 +249,6 @@ func StartEngine(kind Kind, updatesCh chan data.Update, symbols []string, ntf no
 			}
 		}()
 
-		// 초기 1회 산출(없어도 되지만, 모니터링 빨리 시작하고 싶으면 유지)
-		bc.Kick()
-
 		servers.ServeHedgeHTTP(bc)
 		return &Handle{Name: "budgeted_collar", Stop: nil}
 
