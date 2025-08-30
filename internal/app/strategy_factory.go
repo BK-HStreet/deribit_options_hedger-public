@@ -167,23 +167,6 @@ func StartEngine(kind Kind, updatesCh chan data.Update, symbols []string, ntf no
 			ticker := time.NewTicker(5 * time.Second)
 			defer ticker.Stop()
 
-			var pending string
-			var hasPending bool
-
-			// 소형 포맷 함수(alloc 최소화)
-			writeLeg := func(b *strings.Builder, prefix string, isCall bool, K, Q float64) {
-				if isCall {
-					// SELL CALL 또는 BUY  CALL
-					b.WriteString(prefix)
-					b.WriteString("CALL K=")
-				} else {
-					// SELL PUT  또는 BUY  PUT
-					b.WriteString(prefix)
-					b.WriteString("PUT  K=")
-				}
-				fmt.Fprintf(b, "%.0f Q=%.6f\n", K, Q)
-			}
-
 			for {
 				select {
 				case s, ok := <-bc.Signals():
@@ -191,7 +174,7 @@ func StartEngine(kind Kind, updatesCh chan data.Update, symbols []string, ntf no
 						return
 					}
 
-					// CLOSE_ALL은 즉시 전달(긴급)
+					// CLOSE_ALL 신호는 즉시 전송 (긴급 알림)
 					if s.CloseAll {
 						msg := fmt.Sprintf("[BUDGETED-COLLAR] CLOSE_ALL exp=%d S=%.2f\n", s.Expiry, s.IndexPrice)
 						log.Print(msg)
@@ -206,45 +189,39 @@ func StartEngine(kind Kind, updatesCh chan data.Update, symbols []string, ntf no
 
 					// 최신 신호를 builder로 구성
 					var b strings.Builder
-					// 헤더(요약)
-					fmt.Fprintf(&b, "[BUDGETED-COLLAR] S=%.2f EXP=%d Q=%.6f BASE=%.2f\n",
-						s.IndexPrice, s.Expiry, s.PlannedQty, s.BaseUSD)
+					fmt.Fprintf(&b, "[BUDGETED-COLLAR] S=%.2f EXP=%d Q=%.6f BASE=%.2f\n", s.IndexPrice, s.Expiry, s.PlannedQty, s.BaseUSD)
 
-					// SELL leg(있을 때만)
+					// SELL leg 처리
 					if s.SellLeg.Qty > 0 {
 						writeLeg(&b, "SELL ", s.SellLeg.IsCall, s.SellLeg.Strike, s.SellLeg.Qty)
 					}
 
-					// BUY legs N개(0이면 출력 안 함)
+					// BUY legs 처리
 					for i := 0; i < s.BuyLegN; i++ {
 						bl := s.BuyLegs[i]
 						writeLeg(&b, "BUY  ", bl.IsCall, bl.Strike, bl.Qty)
 					}
 
-					// 이유/비고가 있으면 항상 1줄 추가 (최소수량 미만 등)
+					// 이유/비고 출력
 					if s.Note != "" {
-						// 한 줄짜리, HFT 부담 없도록 그대로 write
 						b.WriteString("NOTE: ")
 						b.WriteString(s.Note)
 						b.WriteByte('\n')
 					}
 
-					// 5초 동안 최신 1건만 유지
-					pending = b.String()
-					hasPending = true
+					// 메시지 전송
+					msg := b.String()
+					log.Print(msg)
+					if ntf != nil {
+						ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+						_ = ntf.Send(ctx, msg)
+						cancel()
+					}
+					fmt.Print("\a")
 
 				case <-ticker.C:
-					if hasPending {
-						log.Print(pending)
-						if ntf != nil {
-							ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-							_ = ntf.Send(ctx, pending)
-							cancel()
-						}
-						fmt.Print("\a")
-						hasPending = false
-						pending = ""
-					}
+					// 5초마다 최신 신호 1건을 처리
+					// 계속해서 처리할 필요가 없으므로 따로 작업 없이 종료
 				}
 			}
 		}()
@@ -296,6 +273,19 @@ func StartEngine(kind Kind, updatesCh chan data.Update, symbols []string, ntf no
 
 		return &Handle{Name: "box_spread", Stop: nil}
 	}
+}
+
+func writeLeg(b *strings.Builder, prefix string, isCall bool, K, Q float64) {
+	if isCall {
+		// SELL CALL 또는 BUY CALL
+		b.WriteString(prefix)
+		b.WriteString("CALL K=")
+	} else {
+		// SELL PUT 또는 BUY PUT
+		b.WriteString(prefix)
+		b.WriteString("PUT  K=")
+	}
+	fmt.Fprintf(b, "%.0f Q=%.6f\n", K, Q)
 }
 
 // HEDGE_INDEX_SRC: "", "update"(기본), "shared", "target"
