@@ -22,6 +22,7 @@ const (
 	KindBox Kind = iota + 1
 	KindProtective
 	KindBudgeted
+	KindEMCalendar
 )
 
 type Handle struct {
@@ -42,6 +43,9 @@ func ChooseStrategy() Kind {
 		case "3", "budgeted_collar", "budget_collar", "budgeted":
 			log.Printf("[STRATEGY] selected=%s (source=STRATEGY=%q)", kindName(KindBudgeted), s)
 			return KindBudgeted
+		case "4", "expected_move_calendar", "expected_move", "em_calendar", "em4", "em":
+			log.Printf("[STRATEGY] selected=%s (source=STRATEGY=%q)", kindName(KindEMCalendar), s)
+			return KindEMCalendar
 		default:
 			log.Printf("[STRATEGY] unknown STRATEGY=%q → fallback", s)
 		}
@@ -58,6 +62,9 @@ func ChooseStrategy() Kind {
 		case "3":
 			log.Printf("[STRATEGY] selected=%s (source=STRATEGY_NUM=%q)", kindName(KindBudgeted), n)
 			return KindBudgeted
+		case "4":
+			log.Printf("[STRATEGY] selected=%s (source=STRATEGY_NUM=%q)", kindName(KindEMCalendar), n)
+			return KindEMCalendar
 		default:
 			log.Printf("[STRATEGY] unknown STRATEGY_NUM=%q → fallback", n)
 		}
@@ -70,6 +77,7 @@ func ChooseStrategy() Kind {
 		fmt.Println("  1) Box Spread (HFT)")
 		fmt.Println("  2) Protective Collar")
 		fmt.Println("  3) Budgeted Protective Collar")
+		fmt.Println("  4) Expected-Move Calendar Hedge")
 		fmt.Print("번호 입력 [기본=1]: ")
 		line, _ := reader.ReadString('\n')
 		switch strings.TrimSpace(line) {
@@ -79,6 +87,9 @@ func ChooseStrategy() Kind {
 		case "3":
 			log.Printf("[STRATEGY] selected=%s (interactive)", kindName(KindBudgeted))
 			return KindBudgeted
+		case "4":
+			log.Printf("[STRATEGY] selected=%s (interactive)", kindName(KindEMCalendar))
+			return KindEMCalendar
 		default:
 			log.Printf("[STRATEGY] selected=%s (interactive default)", kindName(KindBox))
 			return KindBox
@@ -103,6 +114,8 @@ func kindName(k Kind) string {
 		return "protective_collar"
 	case KindBudgeted:
 		return "budgeted_collar"
+	case KindEMCalendar:
+		return "expected_move_calendar"
 	default:
 		return "box_spread"
 	}
@@ -221,13 +234,92 @@ func StartEngine(kind Kind, updatesCh chan data.Update, symbols []string, ntf no
 
 				case <-ticker.C:
 					// 5초마다 최신 신호 1건을 처리
-					// 계속해서 처리할 필요가 없으므로 따로 작업 없이 종료
 				}
 			}
 		}()
 
 		servers.ServeHedgeHTTP(bc)
 		return &Handle{Name: "budgeted_collar", Stop: nil}
+
+	case KindEMCalendar:
+		em := strategy.NewExpectedMoveCalendarHedge(updatesCh)
+		em.InitializeHFT(symbols)
+		em.SetIndexSource(parseIndexSource()) // update/shared/target
+
+		if t, ok := parseTestTarget(os.Getenv("HEDGE_TEST_TARGET")); ok {
+			em.SetTarget(t)
+			log.Printf("[TEST] HEDGE_TEST_TARGET applied: side=%d qty=%.8f base=%.2f",
+				t.Side, t.QtyBTC, t.BaseUSD)
+		}
+
+		go em.Run()
+		log.Printf("Expected-move calendar hedge started.. (index_src=%s)", os.Getenv("HEDGE_INDEX_SRC"))
+
+		// 신호 소비자: 로그 + 텔레그램 + 메인마켓 close 통지
+		go func() {
+			for s := range em.Signals() {
+				// CLOSE_ALL 즉시 알림 + 메인마켓 통지
+				if s.CloseAll {
+					msg := fmt.Sprintf("[EM-CALENDAR] CLOSE_ALL near=%d far=%d S=%.2f reason=%s deribitPNL=%.2f combined=%.2f Q=%.6f\n",
+						s.ExpiryNear, s.ExpiryFar, s.IndexPrice, s.CloseReason, s.EstHedgePNLUS, s.CombinedPNLUS, s.PlannedQty)
+					log.Print(msg)
+					if ntf != nil {
+						ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+						_ = ntf.Send(ctx, msg)
+						cancel()
+					}
+					servers.NotifyMainClose(servers.CloseNotify{
+						Type:           "CLOSE_ALL",
+						Strategy:       "expected_move_calendar",
+						QtyBTC:         s.PlannedQty,
+						NearExpiry:     s.ExpiryNear,
+						FarExpiry:      s.ExpiryFar,
+						IndexUSD:       s.IndexPrice,
+						DeribitPNLUSD:  s.EstHedgePNLUS,
+						CombinedPNLUSD: s.CombinedPNLUS,
+						Note:           s.CloseReason,
+						TsMs:           time.Now().UnixMilli(),
+					})
+					fmt.Print("\a")
+					continue
+				}
+
+				var b strings.Builder
+				fmt.Fprintf(&b, "[EM-CALENDAR] S=%.2f NEAR=%d FAR=%d Q=%.6f EM=%.2f%% NetUSD=%.2f FeesUSD=%.2f\n",
+					s.IndexPrice, s.ExpiryNear, s.ExpiryFar, s.PlannedQty, s.EMPercent*100.0, s.NetCostUSD, s.FeesUSD)
+				if s.EMLowerUSD > 0 && s.EMUpperUSD > 0 {
+					fmt.Fprintf(&b, "EM-Range: [%.0f, %.0f]\n", s.EMLowerUSD, s.EMUpperUSD)
+				}
+				for i := 0; i < s.LegN && i < len(s.Legs); i++ {
+					leg := s.Legs[i]
+					if leg.Qty <= 0 {
+						continue
+					}
+					if leg.Side == strategy.SideBuy {
+						writeLeg(&b, "BUY  ", leg.IsCall, leg.Strike, leg.Qty)
+					} else {
+						writeLeg(&b, "SELL ", leg.IsCall, leg.Strike, leg.Qty)
+					}
+				}
+				if s.Note != "" {
+					b.WriteString("NOTE: ")
+					b.WriteString(s.Note)
+					b.WriteByte('\n')
+				}
+
+				msg := b.String()
+				log.Print(msg)
+				if ntf != nil {
+					ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+					_ = ntf.Send(ctx, msg)
+					cancel()
+				}
+				fmt.Print("\a")
+			}
+		}()
+
+		servers.ServeHedgeHTTP(em)
+		return &Handle{Name: "expected_move_calendar", Stop: nil}
 
 	default: // KindBox
 		eng := strategy.NewBoxSpreadHFT(updatesCh)
@@ -277,11 +369,9 @@ func StartEngine(kind Kind, updatesCh chan data.Update, symbols []string, ntf no
 
 func writeLeg(b *strings.Builder, prefix string, isCall bool, K, Q float64) {
 	if isCall {
-		// SELL CALL 또는 BUY CALL
 		b.WriteString(prefix)
 		b.WriteString("CALL K=")
 	} else {
-		// SELL PUT 또는 BUY PUT
 		b.WriteString(prefix)
 		b.WriteString("PUT  K=")
 	}
