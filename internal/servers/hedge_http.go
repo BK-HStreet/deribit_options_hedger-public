@@ -131,6 +131,9 @@ func ServeHedgeHTTP(e HedgeHTTPEngine) {
 			return
 		}
 
+		log.Printf("[HEDGE-HTTP] /hedge/update_mm seq=%d PNL=%f TsMs=%d",
+			m.Seq, m.MainPNLUSD, m.TsMs)
+
 		// 옵션: seq 중복 방지 (있어도 되고 없어도 됨)
 		for {
 			prev := atomic.LoadUint64(&lastMMSeq)
