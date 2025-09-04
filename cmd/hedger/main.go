@@ -35,8 +35,12 @@ func main() {
 	log.Printf("[INFO] Shared memory base pointer: 0x%x", data.SharedMemoryPtr())
 
 	// 옵션 유니버스 준비
-	opts, nearest := app.BuildUniverse()
-	log.Printf("[INFO] Selected %d options from expiry %s", len(opts.Symbols), nearest)
+	opts, nearLbl, farLbl := app.BuildUniverse()
+	if nearLbl == farLbl {
+		log.Printf("[INFO] Selected %d options from expiry %s", len(opts.Symbols), nearLbl)
+	} else {
+		log.Printf("[INFO] Selected %d options from expiries near=%s, far=%s", len(opts.Symbols), nearLbl, farLbl)
+	}
 
 	// FIX 구독 세팅 + 오더북 초기화
 	fix.SetOptionSymbols(opts.Symbols)

@@ -7,6 +7,7 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -23,17 +24,49 @@ type Universe struct {
 	Symbols []string
 }
 
-func BuildUniverse() (Universe, string) {
+// BuildUniverse: 오늘~HEDGE_EM_MAX_DAYS(기본 7일) 이내의 만기 중
+// 가장 가까운 만기(near)와 가장 먼 만기(far)를 동시에 포함해서
+// 심볼 리스트를 구성한다.
+// 반환: Universe, nearLabel, farLabel
+func BuildUniverse() (Universe, string, string) {
 	S := fetchBTCPrice()
 	data.SetIndexPrice(S)
 
 	instruments := fetchInstruments()
-	label, expiryUTC := findNearestExpiryUTC(instruments)
-	symbols := filterOptionsByTS(instruments, expiryUTC, S)
-	if len(symbols) > data.MaxOptions {
-		symbols = symbols[:data.MaxOptions]
+	// 기간: 기본 7일, ENV로 조정(HEDGE_EM_MAX_DAYS)
+	maxDays := 7
+	if v := strings.TrimSpace(os.Getenv("HEDGE_EM_MAX_DAYS")); v != "" {
+		if x, err := strconv.Atoi(v); err == nil && x > 0 {
+			maxDays = x
+		}
 	}
-	return Universe{Symbols: symbols}, label
+
+	nearLabel, nearUTC, farLabel, farUTC := findNearAndFarWithinDays(instruments, maxDays)
+
+	// per-expiry cap: 총 40을 near/far 1:1로 배분(20/20).
+	perCap := data.MaxOptions / 2
+	nearSyms := filterOptionsByTSCap(instruments, nearUTC, S, perCap)
+	farSyms := filterOptionsByTSCap(instruments, farUTC, S, perCap)
+
+	// near==far 인 경우 중복 제거
+	merged := make([]string, 0, data.MaxOptions)
+	seen := make(map[string]struct{}, data.MaxOptions)
+	for _, s := range append(nearSyms, farSyms...) {
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		merged = append(merged, s)
+		if len(merged) >= data.MaxOptions {
+			break
+		}
+	}
+
+	log.Printf("[INFO] Nearest expiry: %s (UTC %s)", nearLabel, nearUTC.Format(time.RFC3339))
+	log.Printf("[INFO] Farthest expiry within %dd: %s (UTC %s)", maxDays, farLabel, farUTC.Format(time.RFC3339))
+	log.Printf("[INFO] Filtered %d options (near %d, far %d) within 20%% of ATM", len(merged), len(nearSyms), len(farSyms))
+
+	return Universe{Symbols: merged}, nearLabel, farLabel
 }
 
 func fetchBTCPrice() float64 {
@@ -78,14 +111,22 @@ func fetchInstruments() []Instrument {
 	return out
 }
 
-func findNearestExpiryUTC(instruments []Instrument) (label string, expiryUTC time.Time) {
+// findNearAndFarWithinDays: 오늘 이후 now+maxDays 이내의 만기 중
+// 가장 가까운(near) & 가장 먼(far) 만기를 찾는다.
+func findNearAndFarWithinDays(instruments []Instrument, maxDays int) (nearLabel string, nearUTC time.Time, farLabel string, farUTC time.Time) {
 	nowUTC := time.Now().UTC()
-	var best time.Time
+	limit := nowUTC.Add(time.Duration(maxDays) * 24 * time.Hour)
+
+	type exp struct {
+		label string
+		t     time.Time
+	}
 	seen := make(map[string]bool)
+	var exps []exp
 
 	for _, inst := range instruments {
 		t := time.UnixMilli(inst.ExpireMs).UTC()
-		if !t.After(nowUTC) {
+		if !t.After(nowUTC) || t.After(limit) {
 			continue
 		}
 		parts := strings.Split(inst.Name, "-")
@@ -97,20 +138,19 @@ func findNearestExpiryUTC(instruments []Instrument) (label string, expiryUTC tim
 			continue
 		}
 		seen[lbl] = true
-		if best.IsZero() || t.Before(best) {
-			best, label = t, lbl
-		}
+		exps = append(exps, exp{label: lbl, t: t})
 	}
-	if best.IsZero() {
-		log.Fatal("[EXPIRY] no future expiries found (by timestamp)")
+	if len(exps) == 0 {
+		log.Fatal("[EXPIRY] no future expiries found within window")
 	}
-	kst := time.FixedZone("KST", 9*3600)
-	log.Printf("[INFO] Nearest expiry: %s (UTC %s / KST %s)",
-		label, best.Format(time.RFC3339), best.In(kst).Format("2006-01-02 15:04:05"))
-	return label, best
+	sort.Slice(exps, func(i, j int) bool { return exps[i].t.Before(exps[j].t) })
+	nearLabel, nearUTC = exps[0].label, exps[0].t
+	farLabel, farUTC = exps[len(exps)-1].label, exps[len(exps)-1].t
+	return
 }
 
-func filterOptionsByTS(instruments []Instrument, expiryUTC time.Time, atmPrice float64) []string {
+// 특정 만기의 옵션을 ATM±20% 내에서 cap 개수(콜/풋 반반)만 선별
+func filterOptionsByTSCap(instruments []Instrument, expiryUTC time.Time, atmPrice float64, cap int) []string {
 	type opt struct {
 		name     string
 		strike   float64
@@ -143,7 +183,10 @@ func filterOptionsByTS(instruments []Instrument, expiryUTC time.Time, atmPrice f
 	}
 	sort.Slice(list, func(i, j int) bool { return list[i].distance < list[j].distance })
 
-	callCap, putCap := data.MaxOptions/2, data.MaxOptions/2
+	if cap <= 0 {
+		cap = data.MaxOptions
+	}
+	callCap, putCap := cap/2, cap/2
 	callCount, putCount := 0, 0
 	balanced := make([]opt, 0, len(list))
 	for _, o := range list {
@@ -154,7 +197,7 @@ func filterOptionsByTS(instruments []Instrument, expiryUTC time.Time, atmPrice f
 			balanced = append(balanced, o)
 			putCount++
 		}
-		if len(balanced) >= data.MaxOptions {
+		if len(balanced) >= cap {
 			break
 		}
 	}
@@ -162,8 +205,6 @@ func filterOptionsByTS(instruments []Instrument, expiryUTC time.Time, atmPrice f
 	for i, o := range balanced {
 		out[i] = o.name
 	}
-	log.Printf("[INFO] Filtered to %d options (%d calls, %d puts) within 20%% of ATM",
-		len(out), callCount, putCount)
 	return out
 }
 
