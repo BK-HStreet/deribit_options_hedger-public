@@ -101,6 +101,7 @@ func ServeHedgeHTTP(e HedgeHTTPEngine) {
 		switch strings.ToUpper(m.Type) {
 		case "CLOSE_ALL":
 			e.SetTarget(strategy.HedgeTarget{Side: 0, QtyBTC: 0, BaseUSD: 0, IndexUSD: 0, Seq: m.Seq})
+			// e.Wake() // main market에서 close되어도 hedger에는 아무런 영향이 없어야함.
 		default: // "SNAPSHOT"
 			e.SetTarget(strategy.HedgeTarget{
 				Side:     side,
@@ -116,7 +117,7 @@ func ServeHedgeHTTP(e HedgeHTTPEngine) {
 		_, _ = w.Write([]byte(`{"ok":true}`))
 	})
 
-	// 2) 메인에서 미실현 PnL(USD) 업데이트
+	// 2) 메인에서 미실현 PnL(USD) 업데이트, Options_hedge 포지션을 close 시키기 위한 트리거
 	mux.HandleFunc("/hedge/update_mm", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
