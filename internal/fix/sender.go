@@ -23,11 +23,11 @@ func SendOrder(d model.Depth, side enum.Side) {
 		field.NewOrdType(enum.OrdType_LIMIT),
 	)
 
-	// ✅ 공통 필드 설정
+	// Setting common fields
 	order.Set(field.NewSymbol(d.Instrument))
 	order.Set(field.NewTimeInForce(enum.TimeInForce_IMMEDIATE_OR_CANCEL))
 
-	// ✅ Bid/Ask 방향에 따라 가격과 수량 결정
+	// Deciding Price & Qty according to Bid/Ask direction
 	if side == enum.Side_BUY {
 		order.Set(field.NewOrderQty(decimal.NewFromFloat(d.AskQty), 0))
 		order.Set(field.NewPrice(decimal.NewFromFloat(d.Ask), 0))
@@ -36,7 +36,7 @@ func SendOrder(d model.Depth, side enum.Side) {
 		order.Set(field.NewPrice(decimal.NewFromFloat(d.Bid), 0))
 	}
 
-	// ✅ 세션 자동 선택 (quickfix.cfg 기반)
+	// Auto selecting the session (based on quickfix.cfg)
 	if err := quickfix.Send(order); err != nil {
 		log.Println("[FIX] SendOrder error:", err)
 	} else {

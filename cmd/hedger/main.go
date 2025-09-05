@@ -21,11 +21,11 @@ import (
 func main() {
 	_ = godotenv.Load()
 
-	// HFT: 고정 스레드
+	// HFT: pin to a single OS thread for deterministic scheduling
 	runtime.GOMAXPROCS(1)
 	runtime.LockOSThread()
 
-	// 인증
+	// Auth
 	clientID, clientSecret := os.Getenv("DERIBIT_CLIENT_ID"), os.Getenv("DERIBIT_CLIENT_SECRET")
 	if clientID == "" || clientSecret == "" {
 		log.Fatal("[AUTH] missing DERIBIT_CLIENT_ID or DERIBIT_CLIENT_SECRET")
@@ -34,7 +34,7 @@ func main() {
 
 	log.Printf("[INFO] Shared memory base pointer: 0x%x", data.SharedMemoryPtr())
 
-	// 옵션 유니버스 준비
+	// Build option universe
 	opts, nearLbl, farLbl := app.BuildUniverse()
 	if nearLbl == farLbl {
 		log.Printf("[INFO] Selected %d options from expiry %s", len(opts.Symbols), nearLbl)
@@ -42,32 +42,32 @@ func main() {
 		log.Printf("[INFO] Selected %d options from expiries near=%s, far=%s", len(opts.Symbols), nearLbl, farLbl)
 	}
 
-	// FIX 구독 세팅 + 오더북 초기화
+	// Configure FIX subscriptions and initialize order books
 	fix.SetOptionSymbols(opts.Symbols)
 	updatesCh := make(chan data.Update, 2048)
 	data.InitOrderBooks(opts.Symbols, updatesCh)
 
-	// 노티파이어(옵션)
+	// Optional notifier (Telegram)
 	var ntf notify.Notifier
 	if n, err := notify.NewTelegramFromEnv(); err == nil {
 		ntf = n
 	}
 
-	// 전략 선택 및 기동
+	// Select and start strategy
 	handle := app.StartEngine(app.ChooseStrategy(), updatesCh, opts.Symbols, ntf)
 
-	// FIX 시작
+	// Start FIX
 	if err := fix.InitFIXEngine("config/quickfix.cfg"); err != nil {
 		log.Printf("[FIX] Init failed: %v", err)
 	}
 	defer fix.StopFIXEngine()
 
-	// 종료 대기
+	// Wait for termination signal
 	sigc := make(chan os.Signal, 1)
 	signal.Notify(sigc, syscall.SIGINT, syscall.SIGTERM)
 	<-sigc
 
-	// 종료 처리 (필요 시)
+	// Graceful shutdown (if needed)
 	if handle.Stop != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 750*time.Millisecond)
 		defer cancel()

@@ -1,4 +1,3 @@
-// File: internal/app/universe.go
 package app
 
 import (
@@ -24,16 +23,17 @@ type Universe struct {
 	Symbols []string
 }
 
-// BuildUniverse: 오늘~HEDGE_EM_MAX_DAYS(기본 7일) 이내의 만기 중
-// 가장 가까운 만기(near)와 가장 먼 만기(far)를 동시에 포함해서
-// 심볼 리스트를 구성한다.
-// 반환: Universe, nearLabel, farLabel
+// BuildUniverse:
+// Selects option symbols within the range of today to HEDGE_EM_MAX_DAYS (default 7 days).
+// Always includes both the nearest expiry (near) and the farthest expiry (far).
+// Returns the Universe of symbols, nearLabel, and farLabel.
 func BuildUniverse() (Universe, string, string) {
 	S := fetchBTCPrice()
 	data.SetIndexPrice(S)
 
 	instruments := fetchInstruments()
-	// 기간: 기본 7일, ENV로 조정(HEDGE_EM_MAX_DAYS)
+
+	// Time window: default 7 days, configurable via ENV (HEDGE_EM_MAX_DAYS)
 	maxDays := 7
 	if v := strings.TrimSpace(os.Getenv("HEDGE_EM_MAX_DAYS")); v != "" {
 		if x, err := strconv.Atoi(v); err == nil && x > 0 {
@@ -43,12 +43,12 @@ func BuildUniverse() (Universe, string, string) {
 
 	nearLabel, nearUTC, farLabel, farUTC := findNearAndFarWithinDays(instruments, maxDays)
 
-	// per-expiry cap: 총 40을 near/far 1:1로 배분(20/20).
+	// Per-expiry cap: total 40 options, evenly split into 20 near and 20 far
 	perCap := data.MaxOptions / 2
 	nearSyms := filterOptionsByTSCap(instruments, nearUTC, S, perCap)
 	farSyms := filterOptionsByTSCap(instruments, farUTC, S, perCap)
 
-	// near==far 인 경우 중복 제거
+	// Deduplicate if near == far
 	merged := make([]string, 0, data.MaxOptions)
 	seen := make(map[string]struct{}, data.MaxOptions)
 	for _, s := range append(nearSyms, farSyms...) {
@@ -69,6 +69,8 @@ func BuildUniverse() (Universe, string, string) {
 	return Universe{Symbols: merged}, nearLabel, farLabel
 }
 
+// Fetch BTC index price from Deribit.
+// Falls back to 65000 if fetch or decode fails.
 func fetchBTCPrice() float64 {
 	res, err := http.Get("https://www.deribit.com/api/v2/public/get_index_price?index_name=btc_usd")
 	if err != nil {
@@ -88,6 +90,8 @@ func fetchBTCPrice() float64 {
 	return r.Result.IndexPrice
 }
 
+// Fetch the full list of BTC option instruments from Deribit.
+// Returns only active instruments.
 func fetchInstruments() []Instrument {
 	res, err := http.Get("https://www.deribit.com/api/v2/public/get_instruments?currency=BTC&kind=option")
 	if err != nil {
@@ -111,8 +115,9 @@ func fetchInstruments() []Instrument {
 	return out
 }
 
-// findNearAndFarWithinDays: 오늘 이후 now+maxDays 이내의 만기 중
-// 가장 가까운(near) & 가장 먼(far) 만기를 찾는다.
+// findNearAndFarWithinDays:
+// Among expiries that fall between now and now+maxDays,
+// pick the nearest expiry (near) and the farthest expiry (far).
 func findNearAndFarWithinDays(instruments []Instrument, maxDays int) (nearLabel string, nearUTC time.Time, farLabel string, farUTC time.Time) {
 	nowUTC := time.Now().UTC()
 	limit := nowUTC.Add(time.Duration(maxDays) * 24 * time.Hour)
@@ -149,7 +154,9 @@ func findNearAndFarWithinDays(instruments []Instrument, maxDays int) (nearLabel 
 	return
 }
 
-// 특정 만기의 옵션을 ATM±20% 내에서 cap 개수(콜/풋 반반)만 선별
+// filterOptionsByTSCap:
+// For a specific expiry, filter options that are within ±20% of ATM price.
+// Limit the count to "cap", evenly split between calls and puts.
 func filterOptionsByTSCap(instruments []Instrument, expiryUTC time.Time, atmPrice float64, cap int) []string {
 	type opt struct {
 		name     string
@@ -208,7 +215,8 @@ func filterOptionsByTSCap(instruments []Instrument, expiryUTC time.Time, atmPric
 	return out
 }
 
-// tiny scanf without fmt import in this file (alloc-free)
+// fmtSscanf: tiny wrapper to parse float without importing fmt in this file.
+// Allocation-free.
 func fmtSscanf(s string, out *float64) (int, error) {
 	v, err := strconv.ParseFloat(s, 64)
 	if err != nil {

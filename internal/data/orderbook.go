@@ -5,7 +5,7 @@ const (
 )
 
 var (
-	symbolToIndex [maxSymbols]int32 // 직접 인덱싱
+	symbolToIndex [maxSymbols]int32 // direct indexing
 	symbolNames   [maxSymbols]string
 	updateCh      chan Update
 	symbolCount   int32
@@ -43,7 +43,7 @@ func ApplyUpdateFast(symbolIdx int32, isBid bool, price, qty, idxPrice float64) 
 		SetIndexPrice(idxPrice)
 	}
 
-	// 논블로킹 채널 전송
+	// non-blocking channel trasnfer
 	select {
 	case updateCh <- Update{
 		SymbolIdx:  symbolIdx,

@@ -1,4 +1,3 @@
-// File: internal/notify/telegram.go
 package notify
 
 import (
@@ -27,13 +26,12 @@ type Telegram struct {
 }
 
 func NewTelegramFromEnv() (Notifier, error) {
-	// 우선 현재 프로세스 환경에서 읽기 (main.go가 이미 godotenv.Load() 호출)
 	tok := os.Getenv("TELEGRAM_BOT_TOKEN")
 	cid := os.Getenv("TELEGRAM_CHAT_ID")
 
-	// 비어있다면 .env를 한 번 더 시도 (단독 테스트 대비)
+	// Re-call .env if empty for testing purpose
 	if tok == "" || cid == "" {
-		_ = godotenv.Load() // 덮어쓰지 않음; 있으면 로드
+		_ = godotenv.Load() // no overwriting; load if exists
 		if tok == "" {
 			tok = os.Getenv("TELEGRAM_BOT_TOKEN")
 		}

@@ -24,14 +24,14 @@ type App struct{}
 
 var optionSymbols []string
 
-// ✅ HFT 최적화: 심볼 -> 인덱스 매핑 (O(1) 룩업)
+// Optimized for HFT: symbol -> index mapping (O(1) lookup)
 var symbolToIndex map[string]int32
 var indexToSymbol [data.MaxOptions]string
 
+// SetOptionSymbols initializes symbol-index mappings for fast lookup.
 func SetOptionSymbols(symbols []string) {
 	optionSymbols = symbols
 
-	// ✅ 심볼 인덱스 매핑 초기화 (HFT 최적화)
 	symbolToIndex = make(map[string]int32, len(symbols))
 	for i, sym := range symbols {
 		if i >= data.MaxOptions {
@@ -51,10 +51,11 @@ func getSymbolIndex(symbol string) int32 {
 
 func (App) OnCreate(id quickfix.SessionID) {}
 
+// OnLogon: sends a MarketDataRequest for options + BTC index once logged in.
 func (App) OnLogon(id quickfix.SessionID) {
 	log.Println("[FIX] >>>> OnLogon received from server!")
 
-	// MarketDataRequest
+	// Create MarketDataRequest
 	mdReq := marketdatarequest.New(
 		field.NewMDReqID("BTC_OPTIONS"),
 		field.NewSubscriptionRequestType(enum.SubscriptionRequestType_SNAPSHOT_PLUS_UPDATES),
@@ -63,7 +64,7 @@ func (App) OnLogon(id quickfix.SessionID) {
 	mdReq.Set(field.NewMDUpdateType(enum.MDUpdateType_INCREMENTAL_REFRESH))
 	mdReq.Set(field.NewAggregatedBook(true))
 
-	// MDEntryTypes (Bid + Offer)
+	// Add MDEntryTypes (Bid + Offer)
 	mdEntryGroup := marketdatarequest.NewNoMDEntryTypesRepeatingGroup()
 	bidEntry := mdEntryGroup.Add()
 	bidEntry.Set(field.NewMDEntryType(enum.MDEntryType_BID))
@@ -71,19 +72,19 @@ func (App) OnLogon(id quickfix.SessionID) {
 	askEntry.Set(field.NewMDEntryType(enum.MDEntryType_OFFER))
 	mdReq.SetGroup(mdEntryGroup)
 
-	// Options Symbol + BTC Index
+	// Add option symbols + BTC-USD Index symbol
 	symGroup := marketdatarequest.NewNoRelatedSymRepeatingGroup()
 	for _, sym := range optionSymbols {
 		entry := symGroup.Add()
 		entry.Set(field.NewSymbol(sym))
 	}
 
-	// Adding BTC-USD Index Symbol (Index Price)
+	// Include BTC index
 	idxEntry := symGroup.Add()
 	idxEntry.Set(field.NewSymbol("BTC-DERIBIT-INDEX"))
 	mdReq.SetGroup(symGroup)
 
-	// Sending Request
+	// Send request
 	if err := quickfix.SendToTarget(mdReq, id); err != nil {
 		log.Println("[FIX] MarketDataRequest send error:", err)
 	} else {
@@ -94,9 +95,10 @@ func (App) OnLogon(id quickfix.SessionID) {
 func (App) OnLogout(id quickfix.SessionID)                           {}
 func (App) ToApp(msg *quickfix.Message, id quickfix.SessionID) error { return nil }
 
+// ToAdmin: custom login authentication handling.
 func (App) ToAdmin(msg *quickfix.Message, id quickfix.SessionID) {
 	msgType, _ := msg.Header.GetString(quickfix.Tag(35))
-	if msgType == "A" {
+	if msgType == "A" { // Logon
 		clientID := os.Getenv("DERIBIT_CLIENT_ID")
 		clientSecret := os.Getenv("DERIBIT_CLIENT_SECRET")
 		timestamp := strconv.FormatInt(time.Now().UnixMilli(), 10)
@@ -127,25 +129,20 @@ func (App) FromAdmin(msg *quickfix.Message, id quickfix.SessionID) quickfix.Mess
 	return nil
 }
 
-// ✅ HFT 최적화: 구조체 크기 최소화
+// PriceLevel: lightweight struct for bid/ask price levels (optimized for HFT).
 type PriceLevel struct {
 	Price float64
 	Qty   float64
 }
 
+// FromApp: handles incoming market data messages.
 func (app *App) FromApp(msg *quickfix.Message, id quickfix.SessionID) quickfix.MessageRejectError {
 	msgType, _ := msg.Header.GetString(quickfix.Tag(35))
-
-	// //benkim..복원필
-	// seqNum, _ := msg.Header.GetString(quickfix.Tag(34))
-	// raw := msg.String()
-	// log.Printf("[FIX-RAW] MsgType=%s Seq=%s Raw=%s", msgType, seqNum, raw)
-	// // benkim..end
 
 	var idxPrice float64
 	foundIndex := false
 
-	// Tag 810 (UnderlyingPx) 확인
+	// Check Tag 810 (UnderlyingPx) for index price
 	var idxField quickfix.FIXFloat
 	if err := msg.Body.GetField(810, &idxField); err == nil {
 		idxPrice = float64(idxField)
@@ -153,10 +150,10 @@ func (app *App) FromApp(msg *quickfix.Message, id quickfix.SessionID) quickfix.M
 		foundIndex = true
 	}
 
-	// MsgType W or X 에서 Tag 269=3 처리 (HFT 최적화 버전)
+	// Process Snapshot (W) or Incremental (X)
 	if msgType == "W" || msgType == "X" {
 		if !foundIndex {
-			// 인덱스 가격 빠른 파싱
+			// Fallback: fast parse index price
 			idxPrice = parseIndexPriceFast(msg)
 			if idxPrice > 0 {
 				data.SetIndexPrice(idxPrice)
@@ -164,10 +161,10 @@ func (app *App) FromApp(msg *quickfix.Message, id quickfix.SessionID) quickfix.M
 			}
 		}
 
-		// Bid/Ask 처리 (HFT 최적화)
+		// Parse bid/ask updates
 		sym, bid, ask, bidQty, askQty, delBid, delAsk := fastParseHFT(msg, msgType)
 
-		// Index 심볼은 무시 (빠른 문자열 비교)
+		// Ignore index symbol
 		if len(sym) > 10 && (strings.HasPrefix(sym, "BTC-DERIBIT") || strings.HasPrefix(sym, "BTC-USD")) {
 			return nil
 		}
@@ -175,7 +172,6 @@ func (app *App) FromApp(msg *quickfix.Message, id quickfix.SessionID) quickfix.M
 		if sym != "" {
 			symbolIdx := getSymbolIndex(sym)
 			if symbolIdx >= 0 {
-				// HFT 최적화된 업데이트 함수 사용
 				if !foundIndex {
 					idxPrice = data.GetIndexPrice()
 				}
@@ -193,9 +189,9 @@ func (app *App) FromApp(msg *quickfix.Message, id quickfix.SessionID) quickfix.M
 	return nil
 }
 
-// HFT 최적화: 인덱스 가격만 빠르게 파싱
+// parseIndexPriceFast: quickly parses index price from FIX message.
 func parseIndexPriceFast(msg *quickfix.Message) float64 {
-	// 먼저 심볼 확인
+	// First check symbol
 	var symField quickfix.FIXString
 	if err := msg.Body.GetField(55, &symField); err != nil {
 		return 0
@@ -206,10 +202,10 @@ func parseIndexPriceFast(msg *quickfix.Message) float64 {
 		return 0
 	}
 
-	// 간단한 그룹 템플릿으로 빠른 파싱
+	// Use a lightweight group template
 	group := quickfix.NewRepeatingGroup(268,
 		quickfix.GroupTemplate{
-			quickfix.GroupElement(279), // MDUpdateAction (X 메시지에 있음)
+			quickfix.GroupElement(279), // MDUpdateAction
 			quickfix.GroupElement(269), // MDEntryType
 			quickfix.GroupElement(270), // Price
 		})
@@ -228,46 +224,43 @@ func parseIndexPriceFast(msg *quickfix.Message) float64 {
 			continue
 		}
 
-		if mdType.String() == "3" { // INDEX 타입
+		if mdType.String() == "3" { // Index type
 			return float64(px)
 		}
 	}
 	return 0
 }
 
-// ✅ HFT 최적화된 FIX 파싱 (메시지 타입별 최적화)
+// fastParseHFT: optimized parser for FIX messages (snapshot/incremental).
 func fastParseHFT(msg *quickfix.Message, msgType string) (string, float64, float64, float64, float64, bool, bool) {
 	var sym string
 	var bestBid, bestAsk, bidQty, askQty float64
 	var delBid, delAsk bool
 
-	// ✅ 심볼 빠른 추출
+	// Fast extract symbol
 	var symField quickfix.FIXString
 	if err := msg.Body.GetField(55, &symField); err == nil {
 		sym = symField.String()
 	}
 
-	// ✅ 메시지 타입별 최적화된 그룹 템플릿
+	// Group template selection
 	var group *quickfix.RepeatingGroup
-
 	switch msgType {
 	case "W": // Snapshot
-		g := quickfix.NewRepeatingGroup(268,
+		group = quickfix.NewRepeatingGroup(268,
 			quickfix.GroupTemplate{
-				quickfix.GroupElement(269), // MDEntryType
-				quickfix.GroupElement(270), // Price
-				quickfix.GroupElement(271), // Size
+				quickfix.GroupElement(269),
+				quickfix.GroupElement(270),
+				quickfix.GroupElement(271),
 			})
-		group = g
 	case "X": // Incremental
-		g := quickfix.NewRepeatingGroup(268,
+		group = quickfix.NewRepeatingGroup(268,
 			quickfix.GroupTemplate{
-				quickfix.GroupElement(279), // MDUpdateAction
-				quickfix.GroupElement(269), // MDEntryType
-				quickfix.GroupElement(270), // Price
-				quickfix.GroupElement(271), // Size
+				quickfix.GroupElement(279),
+				quickfix.GroupElement(269),
+				quickfix.GroupElement(270),
+				quickfix.GroupElement(271),
 			})
-		group = g
 	default:
 		return sym, bestBid, bestAsk, bidQty, askQty, delBid, delAsk
 	}
@@ -277,13 +270,12 @@ func fastParseHFT(msg *quickfix.Message, msgType string) (string, float64, float
 	}
 
 	switch msgType {
-	case "W": // Snapshot - 모든 레벨 수집 후 베스트 찾기
-		// ✅ 스택 배열로 모든 bid/ask 레벨 수집
-		var bids [16]PriceLevel // 최대 16개 레벨 (충분히 큰 버퍼)
+	case "W": // Snapshot: collect levels, find best bid/ask
+		var bids [16]PriceLevel
 		var asks [16]PriceLevel
 		var bidCount, askCount int
 
-		for i := 0; i < group.Len() && i < 32; i++ { // 최대 32개 엔트리
+		for i := 0; i < group.Len() && i < 32; i++ {
 			entry := group.Get(i)
 
 			var mdType quickfix.FIXString
@@ -296,7 +288,6 @@ func fastParseHFT(msg *quickfix.Message, msgType string) (string, float64, float
 				continue
 			}
 
-			// INDEX 타입 스킵
 			if mdType.String() == "3" {
 				continue
 			}
@@ -304,15 +295,14 @@ func fastParseHFT(msg *quickfix.Message, msgType string) (string, float64, float
 			p := float64(price)
 			q := float64(size)
 
-			// ✅ 유효한 가격과 수량만 수집
 			if p > 0 && q > 0 {
 				switch mdType.String() {
-				case "0": // BID
+				case "0": // Bid
 					if bidCount < 16 {
 						bids[bidCount] = PriceLevel{Price: p, Qty: q}
 						bidCount++
 					}
-				case "1": // OFFER
+				case "1": // Ask
 					if askCount < 16 {
 						asks[askCount] = PriceLevel{Price: p, Qty: q}
 						askCount++
@@ -321,7 +311,6 @@ func fastParseHFT(msg *quickfix.Message, msgType string) (string, float64, float
 			}
 		}
 
-		// ✅ 베스트 Bid 찾기 (가장 높은 가격)
 		if bidCount > 0 {
 			bestIdx := 0
 			for i := 1; i < bidCount; i++ {
@@ -333,7 +322,6 @@ func fastParseHFT(msg *quickfix.Message, msgType string) (string, float64, float
 			bidQty = bids[bestIdx].Qty
 		}
 
-		// ✅ 베스트 Ask 찾기 (가장 낮은 가격)
 		if askCount > 0 {
 			bestIdx := 0
 			for i := 1; i < askCount; i++ {
@@ -345,8 +333,8 @@ func fastParseHFT(msg *quickfix.Message, msgType string) (string, float64, float
 			askQty = asks[bestIdx].Qty
 		}
 
-	case "X": // Incremental - 직접 업데이트 처리
-		for i := 0; i < group.Len() && i < 8; i++ { // Incremental은 보통 적음
+	case "X": // Incremental: process updates directly
+		for i := 0; i < group.Len() && i < 8; i++ {
 			entry := group.Get(i)
 
 			var mdType quickfix.FIXString
@@ -360,18 +348,17 @@ func fastParseHFT(msg *quickfix.Message, msgType string) (string, float64, float
 				continue
 			}
 
-			// INDEX 타입 스킵
 			if mdType.String() == "3" {
 				continue
 			}
 
-			entry.GetField(279, &action) // 선택적
+			entry.GetField(279, &action)
 
 			p := float64(price)
 			q := float64(size)
 
-			// ✅ DELETE 액션 처리
-			if action.String() == "2" { // DELETE
+			// Handle delete action
+			if action.String() == "2" {
 				q = 0
 				switch mdType.String() {
 				case "0":
@@ -381,15 +368,15 @@ func fastParseHFT(msg *quickfix.Message, msgType string) (string, float64, float
 				}
 			}
 
-			// ✅ Incremental에서는 첫 번째 업데이트만 사용 (보통 베스트 레벨)
+			// Only keep first update (usually top of book)
 			switch mdType.String() {
-			case "0": // BID
-				if bestBid == 0 { // 첫 번째만
+			case "0": // Bid
+				if bestBid == 0 {
 					bestBid = p
 					bidQty = q
 				}
-			case "1": // OFFER
-				if bestAsk == 0 { // 첫 번째만
+			case "1": // Ask
+				if bestAsk == 0 {
 					bestAsk = p
 					askQty = q
 				}
@@ -402,6 +389,7 @@ func fastParseHFT(msg *quickfix.Message, msgType string) (string, float64, float
 
 var initiator *quickfix.Initiator
 
+// InitFIXEngine starts the FIX initiator with the given configuration file.
 func InitFIXEngine(cfgPath string) error {
 	absPath, err := filepath.Abs(cfgPath)
 	if err != nil {
@@ -431,6 +419,7 @@ func InitFIXEngine(cfgPath string) error {
 	return initiator.Start()
 }
 
+// StopFIXEngine stops the FIX initiator.
 func StopFIXEngine() {
 	if initiator != nil {
 		initiator.Stop()

@@ -8,6 +8,9 @@ import (
 	"net/http"
 )
 
+// FetchJWTToken requests a JWT access token from the Deribit public API.
+// It uses the provided client ID and secret with client_credentials grant type.
+// Returns the access token string, or terminates with log.Fatal on failure.
 func FetchJWTToken(clientID, clientSecret string) string {
 	url := "https://www.deribit.com/api/v2/public/auth"
 
@@ -32,14 +35,15 @@ func FetchJWTToken(clientID, clientSecret string) string {
 	}
 	defer res.Body.Close()
 
-	// ✅ 디버깅 로그: StatusCode
+	// Debug: StatusCode
 	// log.Println("[DEBUG] Auth Status Code:", res.StatusCode)
 
-	// ✅ 디버깅 로그: Body 전체 출력 (민감값은 서버 응답이므로 client_secret 노출 없음)
+	// Debug: Full raw response body
+	// (safe to log since client_secret is not included in the server response)
 	rawBody, _ := io.ReadAll(res.Body)
 	// log.Println("[DEBUG] Auth Raw Response:", string(rawBody))
 
-	// ✅ 다시 decode 위해 buffer 사용
+	// Decode JSON response into struct
 	var r struct {
 		Result struct {
 			AccessToken string `json:"access_token"`
@@ -49,7 +53,7 @@ func FetchJWTToken(clientID, clientSecret string) string {
 		log.Fatal("[AUTH] Decode failed:", err)
 	}
 
-	// ✅ 토큰 값만 로그 (디버깅)
+	// Debug: Log only the token value (optional)
 	// log.Println("[DEBUG] Access Token:", r.Result.AccessToken)
 
 	return r.Result.AccessToken
