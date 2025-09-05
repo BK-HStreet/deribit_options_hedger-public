@@ -94,6 +94,12 @@ flowchart LR
   - API keys (client ID & secret) with trading permissions.
 - **QuickFIX/Go**
   - FIX engine for Deribit connectivity.
+- **QuickFix configuration**  
+  - Path: config/quickfix.cfg
+  Required:
+  ```bash
+  SenderCompID=<your SenderCompID>
+  ```
 - **Environment Variables**  
   Required:
   ```bash
