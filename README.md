@@ -31,32 +31,30 @@ The system is composed of five key components:
 
 ## Architecture Diagram
 
-> This Mermaid flowchart is written to be compatible with GitHub's Mermaid renderer.
-
 ```mermaid
-flowchart TD
-  subgraph DERIBIT
-    REST_API["Deribit REST API"]
-    FIX_API["Deribit FIX 4.4"]
-  end
+flowchart LR
+    subgraph Deribit
+        REST[Deribit REST API]
+        FIX[Deribit FIX 4.4]
+    end
 
-  subgraph HEDGER
-    OB["Shared Order Book (atomic)"]
-    STRAT["Strategy Engine"]
-    HTTP_SERVER["Hedge HTTP Server"]
-  end
+    subgraph Hedger
+        OB[Shared Order Book]
+        Strategy[Strategy Engine]
+        HTTP[Hedge HTTP Server]
+    end
 
-  REST_API --> OB
-  FIX_API --> OB
-  OB --> STRAT
-  STRAT --> HTTP_SERVER
+    REST --> OB
+    FIX --> OB
+    OB --> Strategy
+    Strategy --> HTTP
 
-  MAIN_MARKET["Main Market"]
-  NOTIFIER["Notifier (Telegram / Alerts)"]
+    %% Main market ↔ Hedge HTTP server (bidirectional; main market can push updates to hedger and hedger can notify/ask main market)
+    HTTP <--> MainMarket[Main Market]
 
-  HTTP_SERVER --> MAIN_MARKET
-  STRAT --> NOTIFIER
+    Strategy --> Notifier[Telegram / Alerts]
 ```
+
 
 ---
 
@@ -200,10 +198,10 @@ Please follow project coding conventions (low-allocation patterns, explicit envi
 
 ## License
 
-Choose a license and add it here (e.g., MIT, Apache-2.0). If this repo is private, state internal usage policy.
+This project is licensed under the **Apache License 2.0**. See the `LICENSE` file for details.
 
 ---
 
 ## Contact / Support
 
-Open an issue in the repository or contact the maintainer via the notification channel configured (Telegram or other).
+Contributions are welcome. Please open issues for bugs or feature requests, and submit pull requests for fixes/improvements.
