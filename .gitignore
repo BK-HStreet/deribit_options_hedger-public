@@ -1,19 +1,17 @@
-# 환경 변수
-.env
-.env.*.local
 
-# FIX 메시지 스토어
+
+# FIX message store
 /store/
 
-# 인증서 및 개인 키
+# Certificates and private keys
 *.pem
 *.key
 *.crt
 
-# 로그 파일
+# Log files
 *.log
 
-# 빌드 결과물
+# Build artifacts
 /bin/
 /build/
 *.exe
@@ -21,19 +19,19 @@
 *.so
 *.dylib
 
-# IDE 및 에디터 설정
+# IDE and editor settings
 .vscode/
 .idea/
 *.suo
 *.sw?
 
-# OS 메타 파일
+# OS metadata files
 .DS_Store
 Thumbs.db
 
-# Go 모듈 캐시, 커버리지
+# Go module cache, coverage
 *.out
 coverage.out
 
-# 임시 파일
+# Temporary files
 *.tmp
