@@ -1,4 +1,6 @@
-
+# Environment variables
+.env
+.env.*.local
 
 # FIX message store
 /store/
