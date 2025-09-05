@@ -147,6 +147,32 @@ The binary will:
 
 ---
 
+## Usage Example
+
+After starting the hedger, you can test it locally with curl:
+
+```bash
+curl -X POST http://127.0.0.1:7071/hedge/target \
+     -H "Content-Type: application/json" \
+     -d '{
+       "seq": 1,
+       "type": "SNAPSHOT",
+       "side": "LONG",
+       "qty_btc": 0.001,
+       "base_usd": 110000,
+       "index_usd": 110050
+     }'
+```
+
+Expected response:
+```json
+{"ok": true}
+```
+
+This sets a hedge target and should trigger a strategy evaluation.
+
+---
+
 ## HTTP API
 
 - `POST /hedge/target` — Set hedging target.
