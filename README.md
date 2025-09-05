@@ -31,19 +31,17 @@ The system is composed of five key components:
 
 ## Architecture Diagram
 
-### Mermaid (renders directly in GitLab/GitHub):
-
 ```mermaid
 flowchart TD
     subgraph Deribit
-        REST[Deribit REST API] -->|Auth, Instruments| Hedger
-        FIX[Deribit FIX 4.4] -->|Market Data| Hedger
+        REST[Deribit REST API] --> Hedger
+        FIX[Deribit FIX 4.4] --> Hedger
     end
 
     subgraph Hedger
-        OB[Shared Order Book (HFT)]
-        Strategy[Strategy Engine<br>(Box Spread, EM Calendar future)]
-        HTTP[Hedge HTTP Server<br>/target /update_mm]
+        OB[Shared Order Book]
+        Strategy[Strategy Engine]
+        HTTP[Hedge HTTP Server]
 
         FIX --> OB
         REST --> OB
@@ -52,7 +50,7 @@ flowchart TD
     end
 
     subgraph External
-        MainMarket[Main Market<br>(spot/futures)]
+        MainMarket[Main Market]
         Notifier[Telegram / Alerts]
     end
 
