@@ -35,28 +35,27 @@ The system is composed of five key components:
 
 ```mermaid
 flowchart TD
-    subgraph DERIBIT
-        REST_API[Deribit REST API]
-        FIX_API[Deribit FIX 4.4]
-    end
+  subgraph DERIBIT
+    REST_API["Deribit REST API"]
+    FIX_API["Deribit FIX 4.4"]
+  end
 
-    subgraph HEDGER
-        OB[Shared Order Book]
-        STRAT[Strategy Engine]
-        HTTP[Hedge HTTP Server]
-        NOTIF[Notifier (Telegram / Alerts)]
-    end
+  subgraph HEDGER
+    OB["Shared Order Book (atomic)"]
+    STRAT["Strategy Engine"]
+    HTTP_SERVER["Hedge HTTP Server"]
+  end
 
-    subgraph EXTERNAL
-        MAIN_MARKET[Main Market (execution)]
-    end
+  REST_API --> OB
+  FIX_API --> OB
+  OB --> STRAT
+  STRAT --> HTTP_SERVER
 
-    FIX_API --> OB
-    REST_API --> OB
-    OB --> STRAT
-    STRAT --> HTTP
-    STRAT --> NOTIF
-    HTTP --> MAIN_MARKET
+  MAIN_MARKET["Main Market"]
+  NOTIFIER["Notifier (Telegram / Alerts)"]
+
+  HTTP_SERVER --> MAIN_MARKET
+  STRAT --> NOTIFIER
 ```
 
 ---
