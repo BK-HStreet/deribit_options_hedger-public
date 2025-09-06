@@ -22,7 +22,6 @@ We provide easy reporting channels. Please choose whichever is most convenient:
 
 ### 3) Secure file upload (practical)
 - If you need to send large or sensitive files (logs, PoC data), email `bokim2121@hstreet.finance` with the subject line `Request upload link`.
-- We will reply with a one-time secure upload link (e.g., S3 presigned URL) valid for a limited time (typically 48 hours). The link will be revoked after use.
 
 ---
 
