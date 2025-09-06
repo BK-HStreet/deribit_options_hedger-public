@@ -31,8 +31,7 @@ The system is composed of five key components:
 
 ## Architecture Diagram
 
-```mermaid
-flowchart LR
+flowchart TD
     subgraph Deribit
         REST[Deribit REST API]
         FIX[Deribit FIX 4.4]
@@ -53,8 +52,6 @@ flowchart LR
     HTTP <--> MainMarket[Main Market]
 
     Strategy --> Notifier[Telegram / Alerts]
-```
-
 
 ---
 
