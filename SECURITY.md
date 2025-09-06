@@ -6,7 +6,7 @@ Thank you for taking the time to responsibly disclose security issues for **Deri
 
 ---
 
-## Report options (simple, modern)
+## Report options
 
 We provide easy reporting channels. Please choose whichever is most convenient:
 
@@ -16,16 +16,16 @@ We provide easy reporting channels. Please choose whichever is most convenient:
 - Include: short summary, affected commit hash or tag, reproduction steps, expected vs actual behavior, and any PoC (if available).
 - **Do not** include real secrets (API keys, private keys) directly in email. If you must provide sensitive attachments, request a secure upload link as described below.
 
-### 2) GitHub Private Security Advisory (preferred when available)
+### 2) GitHub Private Security Advisory
 - Use GitHub: Security → Advisories for confidential, tracked reports (reporter needs a GitHub account).
 - Benefits: private discussion, coordinated disclosure, CVE support.
 
-### 3) Secure file upload (practical)
+### 3) Secure file upload
 - If you need to send large or sensitive files (logs, PoC data), email `bokim2121@hstreet.finance` with the subject line `Request upload link`.
 
 ---
 
-## What to include (checklist)
+## What to include
 - Title and short summary  
 - Affected version(s) or commit hash/tag  
 - Minimal reproducible steps or PoC code (if possible)  
@@ -37,7 +37,7 @@ We provide easy reporting channels. Please choose whichever is most convenient:
 
 ---
 
-## Response & handling timeline (target)
+## Response & handling timeline
 - **Acknowledgement:** within 48 hours  
 - **Initial triage & classification:** within 72 hours  
 - **Fix / mitigation plan:** within 14 days for high/critical issues where feasible  
@@ -47,7 +47,7 @@ If you report an active exploit or ongoing attack, please mark the report `CRITI
 
 ---
 
-## Severity guide (informational)
+## Severity guide
 - **Critical:** Remote code execution, data exfiltration, or major financial/operational impact.  
 - **High:** Authentication bypass, privilege escalation, major data leak.  
 - **Medium:** Information disclosure with limited scope, logic bugs causing incorrect behavior.  
