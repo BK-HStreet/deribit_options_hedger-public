@@ -93,9 +93,4 @@ We welcome good-faith security research. If you follow this policy and act in go
 
 ---
 
-## Revision history
-- 2025-09-05: Initial SECURITY.md (contact and simple reporting options)
-
----
-
 Thank you — your reports help keep the project and its users safe.
