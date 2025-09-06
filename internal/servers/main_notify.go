@@ -12,7 +12,7 @@ import (
 
 type CloseNotify struct {
 	Type           string  `json:"type"`     // "CLOSE_ALL"
-	Strategy       string  `json:"strategy"` // e.g., "expected_move_calendar"
+	Strategy       string  `json:"strategy"` // e.g., "box_spread"
 	QtyBTC         float64 `json:"qty_btc"`
 	NearExpiry     uint16  `json:"near_expiry"`
 	FarExpiry      uint16  `json:"far_expiry"`

@@ -23,17 +23,13 @@ type Universe struct {
 	Symbols []string
 }
 
-// BuildUniverse:
-// Selects option symbols within the range of today to HEDGE_EM_MAX_DAYS (default 7 days).
-// Always includes both the nearest expiry (near) and the farthest expiry (far).
-// Returns the Universe of symbols, nearLabel, and farLabel.
 func BuildUniverse() (Universe, string, string) {
 	S := fetchBTCPrice()
 	data.SetIndexPrice(S)
 
 	instruments := fetchInstruments()
 
-	// Time window: default 7 days, configurable via ENV (HEDGE_EM_MAX_DAYS)
+	// Time window: default 7 days
 	maxDays := 7
 	if v := strings.TrimSpace(os.Getenv("HEDGE_EM_MAX_DAYS")); v != "" {
 		if x, err := strconv.Atoi(v); err == nil && x > 0 {
