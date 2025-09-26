@@ -30,7 +30,8 @@ func SendOrder(d model.Depth, side enum.Side) {
 		field.NewOrdType(enum.OrdType_LIMIT),
 	)
 	order.Set(field.NewSymbol(d.Instrument))
-	order.Set(field.NewTimeInForce(enum.TimeInForce_IMMEDIATE_OR_CANCEL))
+	// order.Set(field.NewTimeInForce(enum.TimeInForce_IMMEDIATE_OR_CANCEL))
+	order.Set(field.NewTimeInForce(enum.TimeInForce_GOOD_TILL_CANCEL))
 
 	if side == enum.Side_BUY {
 		order.Set(field.NewOrderQty(decimal.NewFromFloat(d.AskQty), 0))
@@ -91,8 +92,9 @@ func SendBatch(reqs []OrderReq) []error {
 			}
 			tif := req.TIF
 			if tif == "" {
-				// default to IOC (Immediate Or Cancel)
-				tif = enum.TimeInForce_IMMEDIATE_OR_CANCEL
+				// default to GTC (Good Till Cancel)
+				// tif = enum.TimeInForce_IMMEDIATE_OR_CANCEL
+				tif = enum.TimeInForce_GOOD_TILL_CANCEL
 			}
 
 			ord := newordersingle.New(
