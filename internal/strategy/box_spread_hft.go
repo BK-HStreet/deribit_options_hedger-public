@@ -23,6 +23,15 @@ type OptionInfo struct {
 	_      [19]byte
 }
 
+// Target from the external program
+type HedgeTarget struct {
+	Side     int8
+	QtyBTC   float64
+	BaseUSD  float64
+	IndexUSD float64
+	Seq      uint64
+}
+
 // BoxSignal: minimal HFT signal payload
 type BoxSignal struct {
 	LowCallIdx   int16
@@ -53,6 +62,7 @@ type BoxSpreadHFT struct {
 	recentSignals uint64
 	lastCheck     int64
 	notifier      notify.Notifier
+	targetAtom    atomic.Value // HedgeTarget
 
 	// Runtime params
 	minStrikeGap float64 // min strike distance (USD)
@@ -105,6 +115,7 @@ func NewBoxSpreadHFT(ch chan data.Update) *BoxSpreadHFT {
 }
 
 func (e *BoxSpreadHFT) SetNotifier(n notify.Notifier) { e.notifier = n }
+func (e *BoxSpreadHFT) SetTarget(t HedgeTarget)       { e.targetAtom.Store(t) }
 
 // InitializeHFT ingests the pre-selected symbols universe for detection.
 // Expected symbol format: UNDERLYING-EXPIRY-STRIKE-C|P (e.g., BTC-15AUG25-116000-C)

@@ -1,6 +1,7 @@
 package servers
 
 import (
+	"Options_Hedger/internal/strategy"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 
 type HedgeHTTPEngine interface {
 	Wake()
+	SetTarget(strategy.HedgeTarget)
 }
 
 // Optional interface: engines that can accept main-market PnL updates
@@ -90,8 +92,29 @@ func ServeHedgeHTTP(e HedgeHTTPEngine) {
 			}
 		}
 
-		// Box engine does not track external targets; just wake it.
-		e.Wake()
+		side := int8(0)
+		switch strings.ToUpper(m.Side) {
+		case "LONG":
+			side = +1
+		case "SHORT":
+			side = -1
+		}
+
+		switch strings.ToUpper(m.Type) {
+		case "CLOSE_ALL":
+			e.SetTarget(strategy.HedgeTarget{Side: 0, QtyBTC: 0, BaseUSD: 0, IndexUSD: 0, Seq: m.Seq})
+			// e.Wake() // Postion close from main market should not impact to hedger.
+		default: // "SNAPSHOT"
+			e.SetTarget(strategy.HedgeTarget{
+				Side:     side,
+				QtyBTC:   m.QtyBTC,
+				BaseUSD:  m.BaseUSD,
+				IndexUSD: m.IndexUSD,
+				Seq:      m.Seq,
+			})
+			// Box engine does not track external targets; just wake it.
+			e.Wake()
+		}
 
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"ok":true}`))
