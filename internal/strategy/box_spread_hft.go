@@ -23,15 +23,6 @@ type OptionInfo struct {
 	_      [19]byte
 }
 
-// Target from the external program
-type HedgeTarget struct {
-	Side     int8
-	QtyBTC   float64
-	BaseUSD  float64
-	IndexUSD float64
-	Seq      uint64
-}
-
 // BoxSignal: minimal HFT signal payload
 type BoxSignal struct {
 	LowCallIdx   int16
