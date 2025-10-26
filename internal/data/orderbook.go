@@ -56,7 +56,7 @@ func ApplyUpdateFast(symbolIdx int32, isBid bool, price, qty, idxPrice float64) 
 	if obDebug {
 		name := GetSymbolName(symbolIdx)
 		now := Nanotime()
-		freshNs := int64( /* match strategy */ 30_000) * 1_000_000 // 30s → ns; 단순 참고용
+		freshNs := int64( /* match strategy */ 30_000) * 1_000_000 // 30s → ns; for refernce only
 		isFresh := after.LastUpdateNs > 0 && (now-after.LastUpdateNs) <= freshNs
 
 		if isBid {
