@@ -23,7 +23,7 @@ type Universe struct {
 	Symbols []string
 }
 
-func BuildUniverse() (Universe, string, string) {
+func BuildUniverse() (Universe, string, string, error) {
 	S := fetchBTCPrice()
 	data.SetIndexPrice(S)
 
@@ -62,7 +62,7 @@ func BuildUniverse() (Universe, string, string) {
 	log.Printf("[INFO] Farthest expiry within %dd: %s (UTC %s)", maxDays, farLabel, farUTC.Format(time.RFC3339))
 	log.Printf("[INFO] Filtered %d options (near %d, far %d) within 20%% of ATM", len(merged), len(nearSyms), len(farSyms))
 
-	return Universe{Symbols: merged}, nearLabel, farLabel
+	return Universe{Symbols: merged}, nearLabel, farLabel, nil
 }
 
 // Fetch BTC index price from Deribit.

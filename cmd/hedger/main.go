@@ -21,11 +21,11 @@ import (
 func main() {
 	_ = godotenv.Load()
 
-	// HFT: pin to a single OS thread for deterministic scheduling
+	// HFT: Lock to a single thread for deterministic scheduling
 	runtime.GOMAXPROCS(1)
 	runtime.LockOSThread()
 
-	// Auth
+	// Authentication
 	clientID, clientSecret := os.Getenv("DERIBIT_CLIENT_ID"), os.Getenv("DERIBIT_CLIENT_SECRET")
 	if clientID == "" || clientSecret == "" {
 		log.Fatal("[AUTH] missing DERIBIT_CLIENT_ID or DERIBIT_CLIENT_SECRET")
@@ -34,16 +34,33 @@ func main() {
 
 	log.Printf("[INFO] Shared memory base pointer: 0x%x", data.SharedMemoryPtr())
 
-	// Build option universe
-	opts, nearLbl, farLbl := app.BuildUniverse()
-	if nearLbl == farLbl {
-		log.Printf("[INFO] Selected %d options from expiry %s", len(opts.Symbols), nearLbl)
-	} else {
-		log.Printf("[INFO] Selected %d options from expiries near=%s, far=%s", len(opts.Symbols), nearLbl, farLbl)
+	// Prepare option universe
+	opts, nearLbl, farLbl, err := app.BuildUniverse()
+	if err != nil {
+		log.Fatalf("[FATAL] BuildUniverse failed: %v", err)
+	}
+	if len(opts.Symbols) == 0 {
+		log.Fatalf("[FATAL] No options selected (len=0)")
+	}
+	if nearLbl == "" && farLbl == "" {
+		log.Fatalf("[FATAL] No expiry labels returned")
 	}
 
-	// Configure FIX subscriptions and initialize order books
+	if nearLbl != "" && farLbl != "" && nearLbl != farLbl {
+		log.Printf("[INFO] Selected %d options from expiries near=%s, far=%s", len(opts.Symbols), nearLbl, farLbl)
+	} else {
+		// Collapse to a single expiry label (prefer NEAR if available)
+		lbl := nearLbl
+		if lbl == "" {
+			lbl = farLbl
+		}
+		log.Printf("[INFO] Selected %d options from expiry %s", len(opts.Symbols), lbl)
+	}
+
+	// Setup FIX subscription + orderbook initialization
 	fix.SetOptionSymbols(opts.Symbols)
+
+	// Initialize order books (updates will be forwarded to the strategy engine)
 	updatesCh := make(chan data.Update, 2048)
 	data.InitOrderBooks(opts.Symbols, updatesCh)
 
@@ -53,10 +70,10 @@ func main() {
 		ntf = n
 	}
 
-	// Select and start strategy
+	// Select and start trading strategy
 	handle := app.StartEngine(app.ChooseStrategy(), updatesCh, opts.Symbols, ntf)
 
-	// Start FIX
+	// Maintain FIX session for order handling (without subscribing to market data in OnLogon)
 	if err := fix.InitFIXEngine("config/quickfix.cfg"); err != nil {
 		log.Printf("[FIX] Init failed: %v", err)
 	}
@@ -67,11 +84,14 @@ func main() {
 	signal.Notify(sigc, syscall.SIGINT, syscall.SIGTERM)
 	<-sigc
 
-	// Graceful shutdown (if needed)
+	// Graceful shutdown (if required)
 	if handle.Stop != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 750*time.Millisecond)
 		defer cancel()
 		handle.Stop(ctx)
 	}
 	log.Println("[MAIN] Shutting down...")
+
+	// (ws.Stop is called through defer stopWS())
+	time.Sleep(150 * time.Millisecond)
 }
